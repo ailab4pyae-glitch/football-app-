@@ -1,6 +1,6 @@
 # Football Live Streaming Aggregator Backend
 
-A Node.js backend for aggregating football live streaming sources using Fastify.
+A Node.js + Fastify backend for aggregating live football streaming sources.
 
 ## Tech Stack
 
@@ -8,53 +8,77 @@ A Node.js backend for aggregating football live streaming sources using Fastify.
 - **Database:** PostgreSQL
 - **Cache:** Redis
 - **Queue:** BullMQ
-- **Scraper:** Playwright
-
-## Setup Instructions
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/lapyae123/Football-backend.git
-   cd football-app
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-3. **Environment Setup:**
-   - Copy `.env.example` to `.env`
-   - Fill in your actual values:
-     - `DATABASE_URL`: Your PostgreSQL connection string
-     - `REDIS_URL`: Your Redis connection URL
-     - `PORT`: Port for the server (default: 3000)
-
-4. **Database Setup:**
-   - Ensure PostgreSQL is running
-   - Create the database if needed
-
-5. **Redis Setup:**
-   - Ensure Redis is running
-
-6. **Run the application:**
-   - Development: `npm run dev`
-   - Production: `npm start`
-
-The server will start on the specified PORT (default 3000).
+- **Scraper integration:** streamed.su API
 
 ## Project Structure
 
 ```
-src/
-├── config/          # Configuration files
-├── jobs/            # BullMQ job handlers
-├── models/          # Database models
-├── routes/          # API routes
-├── scrapers/        # Playwright scrapers
-└── services/        # Business logic services
+football-app/
+├── src/
+│   ├── config/
+│   │   ├── database.js
+│   │   └── redis.js
+│   ├── db/
+│   │   └── schema.sql
+│   ├── jobs/
+│   │   └── syncMatches.js
+│   ├── routes/
+│   │   ├── tabs.js
+│   │   ├── matches.js
+ │   │   └── streams.js
+│   ├── services/
+│   │   └── streamedSu.js
+ │   └── index.js
+├── .env.example
+├── .gitignore
+└── package.json
+```
+
+## Environment
+
+Copy `.env.example` to `.env` and fill in values:
+
+```bash
+cp .env.example .env
+```
+
+Example values:
+
+```env
+DATABASE_URL=postgresql://user:pass@host/dbname
+REDIS_URL=redis://default:pass@host:port
+PORT=3000
+NODE_ENV=development
+```
+
+## Install
+
+```bash
+npm install
+```
+
+## Database Migration
+
+```bash
+env DATABASE_URL="your_database_url" npm run db:migrate
+```
+
+## Run
+
+```bash
+npm run dev
 ```
 
 ## API Endpoints
 
-- `GET /` - Health check
+- `GET /health` - Server health check
+- `GET /api/tabs` - Active tabs
+- `GET /api/matches?tab=slug` - Matches for a tab
+- `GET /api/matches/:id` - Match detail
+- `GET /api/streams/:matchId` - Stream URLs for a match
+
+## Notes
+
+- Routes cache responses in Redis
+- `syncMatches` job runs every 5 minutes via BullMQ
+- Schema uses UUID primary keys and timestamp fields

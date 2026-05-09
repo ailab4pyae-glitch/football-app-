@@ -1,63 +1,71 @@
 -- Football Live Streaming Aggregator Database Schema
 
--- Tabs table for different streaming categories
-CREATE TABLE tabs (
-    id SERIAL PRIMARY KEY,
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS tabs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(255) UNIQUE NOT NULL,
-    position INTEGER NOT NULL,
-    source_type VARCHAR(50) NOT NULL, -- e.g., 'api', 'scraper'
+    position INT NOT NULL,
+    source_type VARCHAR(50) NOT NULL,
     base_domain VARCHAR(255),
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Sources table for different streaming sources
-CREATE TABLE sources (
-    id SERIAL PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS sources (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
-    driver_type VARCHAR(50) NOT NULL, -- 'api' or 'scraper'
+    driver_type VARCHAR(50) NOT NULL,
     base_domain VARCHAR(255),
-    is_active BOOLEAN DEFAULT TRUE,
-    health_score INTEGER DEFAULT 100,
-    last_domain_check TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    is_active BOOLEAN DEFAULT true,
+    health_score INT DEFAULT 100,
+    last_checked TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Matches table for football matches
-CREATE TABLE matches (
-    id SERIAL PRIMARY KEY,
-    tab_id INTEGER REFERENCES tabs(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS matches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tab_id UUID REFERENCES tabs(id) ON DELETE CASCADE,
     title VARCHAR(500) NOT NULL,
     home_team VARCHAR(255) NOT NULL,
     away_team VARCHAR(255) NOT NULL,
     home_logo VARCHAR(500),
     away_logo VARCHAR(500),
-    status VARCHAR(20) NOT NULL DEFAULT 'scheduled', -- 'live', 'scheduled', 'finished'
-    scheduled_at TIMESTAMP,
-    source_match_id VARCHAR(255), -- ID from the source
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Stream URLs table for match streaming links
-CREATE TABLE stream_urls (
-    id SERIAL PRIMARY KEY,
-    match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE,
-    url TEXT NOT NULL,
-    quality VARCHAR(10) NOT NULL, -- 'SD' or 'HD'
+    status VARCHAR(50) NOT NULL DEFAULT 'scheduled',
+    scheduled_at TIMESTAMPTZ,
+    source_match_id VARCHAR(255),
     source_name VARCHAR(255),
-    priority INTEGER DEFAULT 1,
-    is_healthy BOOLEAN DEFAULT TRUE,
-    last_checked TIMESTAMP,
-    fail_count INTEGER DEFAULT 0,
-    expires_at TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Indexes for better performance
-CREATE INDEX idx_matches_tab_id ON matches(tab_id);
-CREATE INDEX idx_matches_status ON matches(status);
-CREATE INDEX idx_matches_scheduled_at ON matches(scheduled_at);
-CREATE INDEX idx_stream_urls_match_id ON stream_urls(match_id);
-CREATE INDEX idx_stream_urls_is_healthy ON stream_urls(is_healthy);
-CREATE INDEX idx_tabs_slug ON tabs(slug);
-CREATE INDEX idx_sources_driver_type ON sources(driver_type);
+CREATE TABLE IF NOT EXISTS stream_urls (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    match_id UUID REFERENCES matches(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    quality VARCHAR(10) NOT NULL,
+    source_name VARCHAR(255),
+    priority INT DEFAULT 1,
+    is_healthy BOOLEAN DEFAULT true,
+    last_checked TIMESTAMPTZ,
+    fail_count INT DEFAULT 0,
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tabs_slug ON tabs(slug);
+CREATE INDEX IF NOT EXISTS idx_matches_tab_id ON matches(tab_id);
+CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
+CREATE INDEX IF NOT EXISTS idx_matches_scheduled_at ON matches(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_stream_urls_match_id ON stream_urls(match_id);
+CREATE INDEX IF NOT EXISTS idx_stream_urls_is_healthy ON stream_urls(is_healthy);
+CREATE INDEX IF NOT EXISTS idx_sources_driver_type ON sources(driver_type);
+
+INSERT INTO tabs (id, name, slug, position, source_type, is_active)
+VALUES
+  (gen_random_uuid(), 'Main Live', 'main-live', 1, 'api', true),
+  (gen_random_uuid(), 'SOCO Live', 'soco-live', 2, 'scraper', true),
+  (gen_random_uuid(), 'China Live', 'china-live', 3, 'scraper', true),
+  (gen_random_uuid(), 'Loungsan', 'loungsan', 4, 'scraper', true),
+  (gen_random_uuid(), 'English', 'english', 5, 'api', true)
+ON CONFLICT (slug) DO NOTHING;
