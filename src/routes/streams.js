@@ -2,8 +2,6 @@ const db = require('../config/database');
 const redis = require('../config/redis');
 
 module.exports = async function (fastify, opts) {
-  // GET /api/streams/:matchId
-  // Returns streams grouped by quality: { SD: [...], HD: [...] }
   fastify.get('/api/streams/:matchId', async (request, reply) => {
     const { matchId } = request.params;
     const cacheKey = `streams:${matchId}`;
@@ -15,7 +13,6 @@ module.exports = async function (fastify, opts) {
       fastify.log.warn('Redis miss for streams', err);
     }
 
-    // Reject non-UUID values before hitting the DB
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!UUID_RE.test(matchId)) {
       reply.code(404);
@@ -23,13 +20,14 @@ module.exports = async function (fastify, opts) {
     }
 
     const { rows } = await db.query(
-      `SELECT id, url, quality, source_name, priority, is_healthy, last_checked, expires_at
+      `SELECT id, url, quality, source_name, priority, is_healthy, last_checked, expires_at, latency_ms
        FROM stream_urls
        WHERE match_id = $1
          AND is_healthy = true
          AND (expires_at IS NULL OR expires_at > NOW())
        ORDER BY
-         CASE quality WHEN 'HD' THEN 1 WHEN 'SD' THEN 2 ELSE 3 END ASC,
+         CASE quality WHEN 'SD' THEN 1 WHEN 'HD' THEN 2 ELSE 3 END ASC,
+         latency_ms ASC NULLS LAST,
          priority ASC`,
       [matchId]
     );
@@ -42,13 +40,13 @@ module.exports = async function (fastify, opts) {
         url:          row.url,
         source_name:  row.source_name,
         priority:     row.priority,
+        latency_ms:   row.latency_ms,
         last_checked: row.last_checked,
-        expires_at:   row.expires_at
+        expires_at:   row.expires_at,
       });
     }
 
     try {
-      // Short TTL — stream URLs expire quickly
       await redis.set(cacheKey, JSON.stringify(grouped), 'EX', 30);
     } catch (err) {
       fastify.log.warn('Failed to cache streams', err);

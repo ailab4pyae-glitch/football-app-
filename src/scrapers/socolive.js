@@ -251,11 +251,11 @@ const saveMatchToDB = async (match) => {
     matchId = ins.rows[0].id;
   }
 
-  // Insert stream URLs
+  // Upsert stream URLs — match on base URL (ignore token params) to avoid duplicates
   if (match.streams && match.streams.length > 0) {
     for (const stream of match.streams) {
       const alreadyExists = await db.query(
-        'SELECT id FROM stream_urls WHERE match_id = $1 AND url = $2 LIMIT 1',
+        "SELECT id FROM stream_urls WHERE match_id = $1 AND split_part(url,'?',1) = split_part($2,'?',1) LIMIT 1",
         [matchId, stream.url]
       );
       if (alreadyExists.rows.length === 0) {
@@ -266,10 +266,9 @@ const saveMatchToDB = async (match) => {
           [matchId, stream.url, stream.quality, stream.quality === 'HD' ? 2 : 1]
         );
       } else {
-        // Refresh expiry on existing URL
         await db.query(
-          "UPDATE stream_urls SET expires_at = NOW() + interval '4 hours', is_healthy = true WHERE match_id = $1 AND url = $2",
-          [matchId, stream.url]
+          "UPDATE stream_urls SET url=$1, expires_at = NOW() + interval '4 hours', is_healthy = true WHERE id = $2",
+          [stream.url, alreadyExists.rows[0].id]
         );
       }
     }

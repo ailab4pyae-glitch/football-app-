@@ -58,6 +58,19 @@ ALTER TABLE matches ADD COLUMN IF NOT EXISTS score_away SMALLINT;
 ALTER TABLE matches ADD COLUMN IF NOT EXISTS elapsed_minutes SMALLINT;
 ALTER TABLE matches ADD COLUMN IF NOT EXISTS league VARCHAR(255);
 
+ALTER TABLE stream_urls ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+
+-- Remove duplicate stream URLs (same base URL, different auth_key), keep newest per match
+DELETE FROM stream_urls
+WHERE id IN (
+  SELECT a.id
+  FROM stream_urls a
+  JOIN stream_urls b
+    ON  a.match_id = b.match_id
+    AND split_part(a.url, '?', 1) = split_part(b.url, '?', 1)
+    AND a.created_at < b.created_at
+);
+
 -- Team logos keyed by normalised team name (lowercase, no spaces/punctuation)
 -- logo_url should point to a stable CDN (e.g. Wikipedia/Wikimedia) — no hotlink issues
 CREATE TABLE IF NOT EXISTS team_logos (

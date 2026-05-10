@@ -139,10 +139,10 @@ const saveRoom = async (room, streams, tabId) => {
     matchId = ins.rows[0].id;
   }
 
-  // Upsert stream URLs (auth tokens expire in ~1hr, refresh at 50min)
+  // Upsert stream URLs — match on base URL (ignore auth_key) to avoid duplicates
   for (const s of streams) {
     const ex = await db.query(
-      'SELECT id FROM stream_urls WHERE match_id=$1 AND url=$2 LIMIT 1',
+      "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1) = split_part($2,'?',1) LIMIT 1",
       [matchId, s.url]
     );
     if (ex.rows.length === 0) {
@@ -155,8 +155,8 @@ const saveRoom = async (room, streams, tabId) => {
     } else {
       await db.query(
         `UPDATE stream_urls SET url=$1, expires_at=NOW()+interval '50 minutes', is_healthy=true
-         WHERE match_id=$2 AND id=$3`,
-        [s.url, matchId, ex.rows[0].id]
+         WHERE id=$2`,
+        [s.url, ex.rows[0].id]
       );
     }
   }

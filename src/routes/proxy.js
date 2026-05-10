@@ -22,7 +22,6 @@ module.exports = async function (fastify) {
       return { error: 'Only http/https allowed' };
     }
 
-    // Block requests to private/local networks
     const host = parsed.hostname;
     if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) {
       reply.code(403);
@@ -37,7 +36,6 @@ module.exports = async function (fastify) {
         signal: controller.signal,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-          'Referer':    parsed.origin,
           'Accept':     'image/*,*/*;q=0.8',
         },
       });
