@@ -26,18 +26,22 @@ module.exports = async function (fastify, opts) {
          AND is_healthy = true
          AND (expires_at IS NULL OR expires_at > NOW())
        ORDER BY
-         CASE quality WHEN 'SD' THEN 1 WHEN 'HD' THEN 2 ELSE 3 END ASC,
-         latency_ms ASC NULLS LAST,
-         priority ASC`,
+         CASE quality WHEN 'HD' THEN 1 WHEN 'SD' THEN 2 ELSE 3 END ASC,
+         priority DESC,
+         latency_ms ASC NULLS LAST`,
       [matchId]
     );
 
+    const apiBase = `${request.protocol}://${request.headers.host}`;
     const grouped = { SD: [], HD: [] };
     for (const row of rows) {
       const q = row.quality === 'HD' ? 'HD' : 'SD';
+      // m3u8 streams go through the proxy so auth_key refreshes transparently on every playlist fetch.
+      // FLV streams are proxied as a direct redirect since we can't easily proxy the continuous stream.
+      const isM3u8 = row.url.includes('.m3u8');
       grouped[q].push({
         id:           row.id,
-        url:          row.url,
+        url:          isM3u8 ? `${apiBase}/api/proxy/stream/${row.id}` : row.url,
         source_name:  row.source_name,
         priority:     row.priority,
         latency_ms:   row.latency_ms,

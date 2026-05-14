@@ -2,7 +2,7 @@ const db = require('../config/database');
 const redis = require('../config/redis');
 
 const MAIN_LIVE_SOURCE_TABS = ['soco-live', 'china-live', 'loungsan'];
-const MAIN_LIVE_LIMIT = 10;
+const MAIN_LIVE_LIMIT = 15;
 
 module.exports = async function (fastify, opts) {
   fastify.get('/api/matches', async (request, reply) => {
@@ -34,12 +34,15 @@ module.exports = async function (fastify, opts) {
          ORDER BY
            CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
            CASE
-             WHEN m.league ILIKE '%champions league%' OR m.league ILIKE '%ucl%' THEN 0
-             WHEN m.league ILIKE '%premier league%'                              THEN 1
-             WHEN m.league ILIKE '%la liga%'                                     THEN 2
-             WHEN m.league ILIKE '%bundesliga%'                                  THEN 3
-             WHEN m.league ILIKE '%serie a%'                                     THEN 4
-             WHEN m.league ILIKE '%ligue 1%'                                     THEN 5
+             WHEN m.league ILIKE '%champions league%' OR m.league ILIKE '%ucl%' OR m.league ILIKE '%欧冠%' THEN 0
+             WHEN m.league ILIKE '%premier league%'   OR m.league ILIKE '%英超%' OR m.league ILIKE '%ngoại hạng anh%' THEN 1
+             WHEN m.league ILIKE '%la liga%'           OR m.league ILIKE '%西甲%'                         THEN 2
+             WHEN m.league ILIKE '%bundesliga%'        OR m.league ILIKE '%德甲%'                         THEN 3
+             WHEN m.league ILIKE '%serie a%'           OR m.league ILIKE '%意甲%'                         THEN 4
+             WHEN m.league ILIKE '%ligue 1%'           OR m.league ILIKE '%法甲%'                         THEN 5
+             WHEN m.league ILIKE '%europa league%'     OR m.league ILIKE '%欧联%'                         THEN 6
+             WHEN m.league ILIKE '%world cup%'         OR m.league ILIKE '%世界杯%'                        THEN 7
+             WHEN m.league ILIKE '%eredivisie%'        OR m.league ILIKE '%fa cup%'                       THEN 8
              ELSE 9
            END ASC,
            m.scheduled_at ASC

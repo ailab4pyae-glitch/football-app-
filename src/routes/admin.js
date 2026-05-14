@@ -36,6 +36,85 @@ const bust = async (...keys) => {
   } catch (_) {}
 };
 
+// ─── Ban detection ───────────────────────────────────────────────────────────
+
+const BAN_SIGNALS = {
+  chinalive: {
+    urls: async () => {
+      try {
+        const r = await db.query("SELECT config FROM sources WHERE slug='chinalive' LIMIT 1");
+        const base = r.rows[0]?.config?.api_base || 'https://json.yyzb456.top';
+        return [`${base}/all_live_rooms.json?v=1`];
+      } catch { return ['https://json.yyzb456.top/all_live_rooms.json?v=1']; }
+    },
+    expect: (body) => body.includes('"code":200') || body.includes('"liveStatus"'),
+  },
+  socolive: {
+    urls: async () => {
+      try {
+        const r = await db.query("SELECT config FROM sources WHERE slug='socolive' LIMIT 1");
+        const urls = r.rows[0]?.config?.base_urls;
+        if (Array.isArray(urls) && urls.length) return urls.slice(0, 2);
+      } catch {}
+      return ['https://www.socolive.tv/', 'https://www.barbaramassaad.com/'];
+    },
+    expect: (body) => body.includes('match-item') || body.includes('socolive'),
+  },
+};
+
+const checkScraperAccess = async (slug) => {
+  const signal = BAN_SIGNALS[slug];
+  const urlList = typeof signal.urls === 'function' ? await signal.urls() : signal.urls;
+  const results = [];
+
+  for (const url of urlList) {
+    const start = Date.now();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/json,*/*',
+        },
+      });
+      clearTimeout(timer);
+
+      const body   = await res.text();
+      const ms     = Date.now() - start;
+      const valid  = signal.expect(body);
+      const isCf   = body.includes('cloudflare') && body.includes('challenge');
+      const is403  = res.status === 403 || res.status === 429;
+
+      let status = 'ok';
+      let reason = null;
+      if (isCf)              { status = 'banned'; reason = 'Cloudflare challenge page'; }
+      else if (is403)        { status = 'banned'; reason = `HTTP ${res.status}`; }
+      else if (!valid)       { status = 'warning'; reason = 'Unexpected response — site may have changed'; }
+
+      results.push({ url, status, http: res.status, latency_ms: ms, reason });
+    } catch (err) {
+      const timedOut = err.name === 'AbortError';
+      results.push({
+        url,
+        status: timedOut ? 'timeout' : 'error',
+        http:   null,
+        latency_ms: Date.now() - start,
+        reason: timedOut ? 'Request timed out (10s) — possible IP block' : err.message,
+      });
+    }
+  }
+
+  const worst = results.some((r) => r.status === 'banned')  ? 'banned'
+              : results.some((r) => r.status === 'timeout') ? 'timeout'
+              : results.some((r) => r.status === 'error')   ? 'error'
+              : results.some((r) => r.status === 'warning') ? 'warning'
+              : 'ok';
+
+  return { slug, overall: worst, checks: results };
+};
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 module.exports = async function adminRoutes(fastify) {
@@ -296,6 +375,64 @@ module.exports = async function adminRoutes(fastify) {
     );
     if (!rows.length) { reply.code(404); return { error: 'Source not found' }; }
     return rows[0];
+  });
+
+  // ── Scraper Ban Detection ─────────────────────────────────────────────────
+
+  fastify.get('/api/admin/scrapers/ban-check', { preHandler: requireJwt }, async () => {
+    const checks = await Promise.all([
+      checkScraperAccess('chinalive'),
+      checkScraperAccess('socolive'),
+    ]);
+    return checks;
+  });
+
+  // ── Scraper Controls ───────────────────────────────────────────────────────
+
+  fastify.get('/api/admin/scrapers', { preHandler: requireJwt }, async () => {
+    const { rows } = await db.query(
+      `SELECT id, name, slug, is_active FROM sources WHERE slug IN ('chinalive','socolive') ORDER BY name`
+    );
+
+    const tabMap = { chinalive: 'china-live', socolive: 'soco-live' };
+
+    const scrapers = await Promise.all(
+      rows.map(async (s) => {
+        const tabSlug = tabMap[s.slug];
+        const [tabActive, lastRunRaw] = await Promise.all([
+          redis.get(`scraper:active:${tabSlug}`).then((v) => v !== null).catch(() => null),
+          redis.get(`scraper:last_run:${s.slug}`).catch(() => null),
+        ]);
+        return {
+          id:          s.id,
+          name:        s.name,
+          slug:        s.slug,
+          is_active:   s.is_active,
+          tab_active:  tabActive,
+          last_run_at: lastRunRaw ? new Date(parseInt(lastRunRaw, 10)).toISOString() : null,
+        };
+      })
+    );
+
+    return scrapers;
+  });
+
+  fastify.post('/api/admin/scrapers/:slug/toggle', { preHandler: requireJwt }, async (request, reply) => {
+    const { slug } = request.params;
+    if (!['chinalive', 'socolive'].includes(slug)) {
+      reply.code(400);
+      return { error: 'Unknown scraper slug' };
+    }
+
+    const { rows } = await db.query(
+      `UPDATE sources SET is_active = NOT is_active
+       WHERE slug = $1
+       RETURNING id, name, slug, is_active`,
+      [slug]
+    );
+    if (!rows.length) { reply.code(404); return { error: 'Scraper not found' }; }
+
+    return { slug: rows[0].slug, is_active: rows[0].is_active };
   });
 
   // ── API Test Runner ────────────────────────────────────────────────────────

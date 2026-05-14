@@ -1,54 +1,44 @@
-const { Queue, Worker } = require('bullmq');
-const IORedis = require('ioredis');
+const db = require('../config/database');
+const redis = require('../config/redis');
 const { run } = require('../scrapers/socolive');
 
-const redisUrl = process.env.REDIS_URL;
-if (!redisUrl) throw new Error('REDIS_URL is required');
+const SLUG     = 'socolive';
+const TAB_SLUG = 'soco-live';
+const DEFAULT_INTERVAL_MS = parseInt(process.env.SOCO_SYNC_INTERVAL_MS, 10) || 5 * 60 * 1000;
 
-const redisOptions = { maxRetriesPerRequest: null };
-if (redisUrl.startsWith('rediss://') || process.env.REDIS_TLS === 'true') {
-  redisOptions.tls = { rejectUnauthorized: false };
-}
+let timer = null;
 
-const connection   = new IORedis(redisUrl, redisOptions);
-const QUEUE_NAME   = 'socolive-sync';
-const INTERVAL_MS  = parseInt(process.env.SOCO_SYNC_INTERVAL_MS, 10) || 5 * 60 * 1000;
-
-const queue = new Queue(QUEUE_NAME, {
-  connection,
-  defaultJobOptions: {
-    removeOnComplete: true,
-    removeOnFail: 50,
-    attempts: 1
-  }
-});
-
-new Worker(
-  QUEUE_NAME,
-  async (job) => {
-    console.log(`[socoliveSyncJob] Running job ${job.id}`);
-    await run();
-  },
-  { connection }
-);
-
-// Run immediately on startup, then repeat on interval
-const start = async () => {
+const shouldRun = async () => {
   try {
-    await run();
-  } catch (err) {
-    console.error('[socoliveSyncJob] Initial run failed:', err.message);
-  }
-
-  setInterval(async () => {
-    try {
-      await queue.add('soco-sync', {}, { removeOnComplete: true });
-    } catch (err) {
-      console.error('[socoliveSyncJob] Failed to enqueue job:', err.message);
-    }
-  }, INTERVAL_MS);
+    const [srcRes, tabRes] = await Promise.all([
+      db.query('SELECT is_active FROM sources WHERE slug = $1 LIMIT 1', [SLUG]),
+      db.query('SELECT is_active FROM tabs WHERE slug = $1 LIMIT 1', [TAB_SLUG]),
+    ]);
+    const srcActive = srcRes.rows[0]?.is_active !== false;
+    const tabActive = tabRes.rows[0]?.is_active !== false;
+    return srcActive && tabActive;
+  } catch (_) { return true; } // fail open on DB error
 };
 
-start();
+const getIntervalMs = async () => {
+  try {
+    const r = await db.query('SELECT config FROM sources WHERE slug = $1 LIMIT 1', [SLUG]);
+    const interval = r.rows[0]?.config?.sync_interval;
+    if (interval && Number.isFinite(interval) && interval >= 10000) return interval;
+  } catch (_) {}
+  return DEFAULT_INTERVAL_MS;
+};
 
-module.exports = queue;
+const tick = async () => {
+  const ok = await shouldRun();
+  if (ok) {
+    await redis.set(`scraper:last_run:${SLUG}`, Date.now().toString()).catch(() => {});
+    await run().catch((err) => console.error('[socoliveSyncJob] Failed:', err.message));
+  } else {
+    console.log(`[socoliveSyncJob] Skipped — source or tab is inactive`);
+  }
+  const interval = await getIntervalMs();
+  timer = setTimeout(tick, interval);
+};
+
+tick();

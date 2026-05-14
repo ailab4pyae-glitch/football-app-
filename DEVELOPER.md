@@ -15,18 +15,57 @@ streamzone/     ← Frontend (Next.js, port 3000)
 
 ### SOCO Live (`src/scrapers/socolive.js`)
 
-Playwright headless Chrome သုံးပြီး page ၂ ဆင့် visit လုပ်တယ်။
+Playwright headless Chrome သုံးပြီး **XHR Interception** နည်းလမ်းနဲ့ data ထုတ်ယူတယ်။
 
-**ဆင့် ၁ — Match List**
-`https://www.socolive.tv/` homepage ကိုဖွင့်ပြီး `.match-item` CSS selector ကနေ ပွဲတွေ (team name, logo, time, status, score) ထုတ်ယူတယ်။ Fallback URL: `https://www.barbaramassaad.com`
+**ဘာကြောင့် XHR Interception သုံးသလဲ**
+- SOCO site တွေဟာ domain ပြောင်းလဲနေတယ် — CSS selector scraping ဆိုရင် HTML ပြောင်းတိုင်း ကုဒ်ပြင်ရတယ်
+- XHR interception ဆိုရင် site ကို redesign လုပ်ပေမယ့် API response format မပြောင်းမချင်း scraper ဆက်အလုပ်လုပ်တယ်
 
-**ဆင့် ၂ — Stream URLs (Live ပွဲတွေအတွက်သာ)**
-Individual match page ကိုသွားပြီး:
-1. Network request intercept လုပ်ပြီး `.m3u8` / `.flv` URL ဖမ်းတယ်
+**ဆင့် ၁ — Match List (XHR Interception)**
+
+```
+Playwright → SOCO mirror ဖွင့်တယ်
+    ↓
+Browser က fb-api.apiscoreflow.com/football ကို XHR call လုပ်တယ်
+    ↓
+ကျွန်တော်တို့က အဲ့ response ကို intercept လုပ်ပြီး JSON parse လုပ်တယ်
+    ↓
+Match list ကို clean JSON အနေနဲ့ ရတယ် (HTML parsing မလိုဘူး)
+```
+
+XHR မရရင် → CSS selector fallback (`.match-item`) ကို သုံးတယ်။
+
+**ဆင့် ၂ — Stream URLs (Network Interception)**
+Live ပွဲတွေအတွက်သာ match page ကို visit လုပ်ပြီး:
+1. Context-level network listener → `.m3u8` / `.flv` CDN URL အားလုံး capture လုပ်တယ်
 2. iframe တွေကို real page အဖြစ် ဖွင့်ပြီး play button click လုပ်တယ်
-3. မတွေ့ရင် page HTML source ကို regex နဲ့ ရှာတယ်
+3. Video bytes တွေ server ကို မဖြတ်ဘူး — CDN URL သာ သိမ်းတယ် (copyright-safe)
 
-Live ဖြစ်နေတဲ့ ပွဲ (သို့) kickoff မတိုင်မှီ ၃၀ မိနစ်အတွင်း ပွဲတွေကိုသာ stream fetch လုပ်တယ်။
+**Copyright-Safe ဖြစ်ပုံ**
+- Match data (team name, score, schedule) = factual data မို့ copyright မကျဘူး
+- Stream URL = publicly accessible CDN link — user browser ကနေ တိုက်ရိုက်ဆက်သွားတယ်
+- Video stream bytes — server ကို လုံးဝမဖြတ်ဘူး
+
+---
+
+**Auto-Discovery — Domain ပြောင်းလဲမှုကို ကိုင်တွယ်ပုံ**
+
+SOCO team က copyright takedown ကြောင့် domain ပြောင်းနေကြတယ်။ Scraper က auto-discover လုပ်နိုင်တယ်:
+
+```
+Mirror URL အားလုံး fail
+    ↓
+s2sprediction.net (stable SEO domain) ကို visit လုပ်တယ်
+    ↓
+<link rel="alternate" href="https://new-mirror.com"> tag ကို ဖတ်တယ်
+    ↓
+New mirror URL ကို test လုပ်တယ်
+    ↓
+DB ထဲ auto-save → နောက်ကြိမ် run မှာ အဲ့ URL ကိုပဲ သုံးတယ်
+```
+
+Code: `discoverMirror()` function — `src/scrapers/socolive.js`
+DB update: `sources.config.base_urls` — Admin panel restart မလိုဘဲ အလုပ်လုပ်တယ်
 
 ---
 
@@ -143,14 +182,108 @@ Live stream မှာ lag > 8 seconds ဆိုရင် `currentTime` ကို
 | Tab | Source | Scrape Method |
 |---|---|---|
 | Main Live | streamed.su API | API call |
-| SOCO Live | socolive.tv | Playwright browser |
+| SOCO Live | socolive.tv / s2sprediction.net | Playwright + XHR Interception + Auto-Discovery |
 | China Live | yyzbw8.live / yyzb456.top | HTTP JSON API |
 | Loungsan | aggregated | multiple sources |
 | English | filtered | commentary filter |
 
 ---
 
-## ၆. Caching
+## ၆. Scraper On/Off Switch — Admin Panel
+
+### ဘာကြောင့်လိုသလဲ
+Live site မတည်ငြိမ်တဲ့အချိန်မှာ admin panel ကနေ scraper ကို ချက်ချင်း ပိတ်/ဖွင့်နိုင်ဖို့ အတွက်ထည့်ထားတယ်။
+
+### Admin API Endpoints
+
+| Method | URL | လုပ်ဆောင်ချက် |
+|---|---|---|
+| `GET` | `/api/admin/scrapers` | Scraper တစ်ခုချင်းရဲ့ status ကြည့်မယ် (is_active, tab_active, last_run_at) |
+| `POST` | `/api/admin/scrapers/chinalive/toggle` | China Live scraper On/Off ပြောင်းမယ် |
+| `POST` | `/api/admin/scrapers/socolive/toggle` | SOCO Live scraper On/Off ပြောင်းမယ် |
+
+> JWT token လိုတယ် (`Authorization: Bearer <token>`)
+
+### Toggle ဘယ်လိုသိမ်းသလဲ
+`sources` table ထဲမှာ `is_active` column ကို flip လုပ်တယ်။ Scraper job တွေက tick တိုင်း DB ကို စစ်တာမို့ **restart မလိုဘဲ ချက်ချင်းအကျိုးသက်ရောက်တယ်** (interval ၁ ကြိမ်ကုန်မှပဲ)။
+
+---
+
+## ၇. Tab-Active Gating — Scraper Logic
+
+### ဘယ်လိုအလုပ်လုပ်သလဲ
+
+Scraper job တစ်ခုချင်း tick တိုင်း DB ထဲ check ၂ ခု လုပ်တယ်:
+
+```
+sources.is_active = true   ← Admin panel On/Off switch
+    AND
+tabs.is_active = true      ← Tab ကို admin က enable/disable လုပ်ထားလား
+    ↓
+နှစ်ခုလုံး true မှ scrape run မယ်
+တစ်ခုခု false ဆိုရင် skip (timer ဆက် schedule လုပ်တယ်)
+```
+
+### ဘာကြောင့် Redis မသုံးဘဲ DB ကိုသုံးသလဲ
+ဦးစွာ Redis activity tracking (page visit တိုင်း TTL set) ကို သုံးဖို့ ကြိုးစားခဲ့တယ်။ ဒါပေမဲ့ `tabs` table မှာ `is_active` column ရှိပြီးသားမို့ — Admin panel ကနေ tab ကို inactive လုပ်ရင် scraper ကလည်း အလိုအလျောက် ရပ်တယ်။ ပိုရိုးရှင်းပြီး ပိုတိကျတယ်။
+
+### Admin ကနေ ထိန်းချုပ်ပုံ
+| Action | Effect |
+|---|---|
+| Admin panel → Sources → SOCO toggle off | `sources.is_active = false` → scraper ရပ် |
+| Admin panel → Tabs → SOCO Live toggle off | `tabs.is_active = false` → scraper ရပ် |
+| နှစ်ခုလုံး on | Normal scraping |
+
+---
+
+## ၈. IP Ban Protection — Server IP ပိတ်ခံရမှု ကာကွယ်ပုံ
+
+### ဘာဖြစ်နိုင်သလဲ
+Scraper server ကို deploy လုပ်ပြီးနောက် SOCO / China Live site တွေက server IP ကို block လုပ်နိုင်တယ်။ ထိုအချိန်မှာ:
+- `[socolive] All source URLs failed or returned no matches`
+- `[chinalive] Failed to fetch rooms: Request timeout`
+
+### ဘယ်လိုကာကွယ်ထားသလဲ
+
+**User-Agent Rotation**
+Request တိုင်းမှာ real browser UA ၅ မျိုးထဲကတစ်ခုကို random ရွေးသုံးတယ် — bot detection ကို ရှောင်တယ်။
+
+```js
+// chinalive.js နဲ့ socolive.js နှစ်ခုလုံးမှာ ထည့်ထားတယ်
+const randomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+```
+
+**Request Jitter (China Live)**
+Room တစ်ခုချင်း fetch မတိုင်ခင် 300–900ms random delay ထည့်တယ် — rate limit trigger ကို ရှောင်တယ်။
+
+**Proxy Support**
+Ban ဖြစ်ရင် residential proxy ထည့်လို့ရတယ်:
+```env
+SCRAPER_PROXY=http://user:pass@proxy-host:port
+```
+Playwright မှာ `--proxy-server` arg အနေနဲ့ pass လုပ်တယ်။ Code ပြင်စရာမလိုဘူး — env var တစ်ခုပဲ ပြောင်းရတယ်။
+
+### Ban ဖြစ်ကြောင်း ဘယ်လိုသိသလဲ
+Admin panel → **Sources** page → **"▶ Run Check"** ခလုတ် နှိပ်တယ်:
+
+| Status | အဓိပ္ပါယ် | ဘာလုပ်မလဲ |
+|---|---|---|
+| ✅ `ok` | အဆင်ပြေတယ် | ဘာမှမလုပ်နဲ့ |
+| 🚫 `banned` | IP block ခံရတယ် | Server region ပြောင်း / Proxy ထည့် |
+| ⏱️ `timeout` | Request ၁၀s ထဲ မပြန် | IP block ဖြစ်နိုင် — region ပြောင်းကြည့် |
+| ⚠️ `warning` | Response မမှန်ဘူး | Site redesign ဖြစ်နိုင် |
+| ❌ `error` | Connection fail | Site down / network ပြဿနာ |
+
+API: `GET /api/admin/scrapers/ban-check` (JWT required)
+
+### Ban ဖြစ်ရင် ဘာလုပ်မလဲ (Priority Order)
+1. **Railway မှာ region ပြောင်း** — Singapore → Frankfurt → US → ချက်ချင်း IP သစ်ရတယ် (free)
+2. **SOCO mirror ပြောင်း** — Admin panel → Sources → base_urls ထဲ URL သစ်ထည့် (restart မလို)
+3. **Residential proxy ထည့်** — [webshare.io](https://webshare.io) ကနေ ~$3/mo, `.env` ထဲ `SCRAPER_PROXY=` ထည့်
+
+---
+
+## ၉. Caching
 
 - Stream list: Redis `EX 30` seconds
 - Match list: Redis cache → DB query fallback
@@ -158,20 +291,46 @@ Live stream မှာ lag > 8 seconds ဆိုရင် `currentTime` ကို
 
 ---
 
-## ၇. Environment Variables
+## ၁၀. Environment Variables
 
 ```env
-SOCO_BASE_URL          # default: https://www.socolive.tv
-SOCO_BASE_URL_2        # fallback: https://www.barbaramassaad.com
-HEALTH_CHECK_INTERVAL_MS  # default: 600000 (10 min)
-HEALTH_FAIL_THRESHOLD     # default: 10
-DATABASE_URL           # PostgreSQL (Neon)
-REDIS_URL              # Upstash Redis
+# Database & Cache
+DATABASE_URL              # PostgreSQL — Neon (dev + prod နှစ်ခုလုံး Neon ကို သုံးတယ်)
+REDIS_URL                 # Redis — Upstash (paid plan လိုတယ် — free tier 500k req/month limit)
+REDIS_TLS=true
+
+# Scraper
+SOCO_BASE_URL             # default: https://www.socolive.tv
+SOCO_BASE_URL_2           # fallback: https://s2sprediction.net
+SCRAPER_PROXY=            # optional: http://user:pass@host:port (ban ဖြစ်ရင်သာ ထည့်)
+SCRAPER_INTERVAL_MS       # China Live interval — default: 300000 (5 min)
+SOCO_SYNC_INTERVAL_MS     # SOCO interval — default: 300000 (5 min)
+
+# Health Check
+HEALTH_CHECK_INTERVAL_MS  # default: 600000 (10 min) — admin panel ကနေလည်း ပြောင်းလို့ရတယ်
+HEALTH_FAIL_THRESHOLD     # default: 10 — admin panel ကနေလည်း ပြောင်းလို့ရတယ်
+
+# Admin
+ADMIN_USERNAME            # default: admin
+ADMIN_PASSWORD            # default: 12345
+JWT_SECRET                # JWT signing key
+PORT=3050
 ```
+
+**ဘယ် DB / Redis ကို သုံးသလဲ**
+
+| Service | Dev | Production |
+|---|---|---|
+| Database | Neon (cloud) | Neon (same) |
+| Redis | Upstash | Upstash (same) |
+| Backend | local `npm run dev` | Railway (Singapore region) |
+| Frontend | local `npm run dev` | Vercel |
+
+Vercel ကို backend deploy မလုပ်ရ — serverless မို့ background job တွေ (`setTimeout` loop) run မနိုင်ဘူး။
 
 ---
 
-## ၈. Dev Commands
+## ၁၁. Dev Commands
 
 ```bash
 # Backend start

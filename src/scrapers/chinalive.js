@@ -1,12 +1,22 @@
 const https = require('https');
+const http  = require('http');
 const db = require('../config/database');
-const { resolveLogos } = require('../services/teamLogos');
 
 const CHINA_DEFAULTS = {
   api_base: 'https://json.yyzb456.top',
   referer:  'https://yyzbw8.live/',
 };
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+];
+const randomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const jitter    = (min = 500, max = 2000) =>
+  new Promise((r) => setTimeout(r, Math.floor(Math.random() * (max - min)) + min));
 
 const getSourceConfig = async () => {
   try {
@@ -21,11 +31,42 @@ const getSourceConfig = async () => {
 
 // ─── HTTP helper ─────────────────────────────────────────────────────────────
 
+// Optional HTTP proxy for residential IP routing (set SCRAPER_PROXY=http://user:pass@host:port)
+const PROXY_URL = process.env.SCRAPER_PROXY || null;
+
 const get = (url, referer = CHINA_DEFAULTS.referer) => new Promise((resolve, reject) => {
-  const req = https.get(url, {
-    headers: { 'User-Agent': UA, 'Referer': referer },
-    timeout: 10000,
-  }, (res) => {
+  const parsed = new URL(url);
+  const isHttps = parsed.protocol === 'https:';
+
+  const options = {
+    headers: {
+      'User-Agent': randomUA(),
+      'Referer':    referer,
+      'Accept':     'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    timeout: 12000,
+  };
+
+  let requester = isHttps ? https : http;
+
+  if (PROXY_URL) {
+    const proxy = new URL(PROXY_URL);
+    options.host = proxy.hostname;
+    options.port = proxy.port;
+    options.path = url;
+    options.headers['Host'] = parsed.hostname;
+    if (proxy.username) {
+      const auth = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
+      options.headers['Proxy-Authorization'] = `Basic ${auth}`;
+    }
+    requester = proxy.protocol === 'https:' ? https : http;
+  } else {
+    options.hostname = parsed.hostname;
+    options.path     = parsed.pathname + parsed.search;
+  }
+
+  const req = requester.get(options, (res) => {
     let body = '';
     res.on('data', (d) => (body += d));
     res.on('end', () => resolve(body));
@@ -40,79 +81,33 @@ const parseJsonp = (text) => {
   return JSON.parse(m ? m[1] : text);
 };
 
-// ─── Title parser ─────────────────────────────────────────────────────────────
-
-const parseTitle = (raw) => {
-  // Handle 〖league〗hometeam ... format — extract and remove the 〖...〗 block
-  let cleaned = raw.replace(/〖[^〗]*〗/g, '').replace(/【[^】]*】/g, '').trim();
-  // Strip leading emoji / decorators
-  cleaned = cleaned.replace(/^[\s\p{Emoji}\p{So}★▲◆●■🔥]+/u, '').trim();
-  // Collapse multiple spaces/tabs
-  cleaned = cleaned.replace(/\s+/g, ' ');
-
-  // Split on VS separators: " VS ", "▲", "vs", "V"
-  const SEP = /\s+[Vv][Ss]\.?\s+|\s*▲\s*|\s+[Vv]\s+/;
-  const parts = cleaned.split(SEP);
-
-  if (parts.length >= 2) {
-    const left = parts[0].trim();
-    const away_team = parts[parts.length - 1].trim();
-    // left = "league hometeam" — split off first token as league
-    const leftParts = left.split(' ');
-    const league = leftParts.length > 1 ? leftParts[0] : '';
-    const home_team = leftParts.length > 1 ? leftParts.slice(1).join(' ') : left;
-    return { league, home_team, away_team };
-  }
-
-  // No spaced separator — try inline "leagueHomevs Away"
-  const m = cleaned.match(/^(.+?)\s+(.+?)[Vv][Ss](.+?)$/);
-  if (m) return { league: m[1].trim(), home_team: m[2].trim(), away_team: m[3].trim() };
-
-  return { league: '', home_team: cleaned, away_team: '' };
-};
-
-// ─── Fetch list ───────────────────────────────────────────────────────────────
+// ─── Logo helper ──────────────────────────────────────────────────────────────
 
 const STA_BASE = 'https://sta.yyzb456.top';
 
-// Ensure logo URLs are absolute (some come back as "/file/imgs/..." relative paths)
 const absoluteLogo = (url) => {
   if (!url) return null;
   return url.startsWith('http') ? url : `${STA_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
 };
 
-// Fetch today's match schedule and return a map of roomNum → match metadata
-const fetchSchedule = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
+// ─── Fetch schedule (primary source for match + logo data) ───────────────────
+
+const fetchScheduleMatches = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const url  = `${baseApi}/match/matches_${date}.json?v=${Date.now()}`;
   try {
     const text = await get(url, referer);
     const json = parseJsonp(text);
     const matches = json.data || [];
-
-    const index = new Map(); // roomNum → schedule entry
-    for (const m of matches) {
-      for (const anchor of m.anchors || []) {
-        const roomNum = String(anchor.anchor?.roomNum || anchor.roomNum || '');
-        if (roomNum) {
-          index.set(roomNum, {
-            scheduleId: m.scheduleId,
-            league:     m.subCateName  || null,
-            home_team:  m.hostName     || null,
-            away_team:  m.guestName    || null,
-            home_logo:  absoluteLogo(m.hostIcon),
-            away_logo:  absoluteLogo(m.guestIcon),
-          });
-        }
-      }
-    }
-    console.log(`[chinalive] Schedule loaded: ${matches.length} matches, ${index.size} room entries`);
-    return index;
+    console.log(`[chinalive] Schedule loaded: ${matches.length} matches`);
+    return matches;
   } catch (err) {
     console.warn(`[chinalive] Schedule fetch failed: ${err.message}`);
-    return new Map();
+    return [];
   }
 };
+
+// ─── Fetch live rooms → returns Map<roomNum, room> ────────────────────────────
 
 const fetchRooms = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
   const url = `${baseApi}/all_live_rooms.json?v=${Date.now()}`;
@@ -124,40 +119,42 @@ const fetchRooms = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEF
   for (const arr of Object.values(json.data || {})) {
     if (Array.isArray(arr)) rooms.push(...arr);
   }
-  return rooms.filter((r) => r.liveStatus === 1 && r.liveTypeParent === 1);
+  const live = rooms.filter((r) => r.liveStatus === 1);
+  return new Map(live.map((r) => [String(r.roomNum), r]));
 };
 
 // ─── Fetch stream URLs for one room ──────────────────────────────────────────
 
-const fetchStreams = async (roomNum) => {
-  const url = `${BASE_API}/room/${roomNum}/detail.json?v=${Date.now()}`;
+const fetchStreams = async (roomNum, baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
+  const url = `${baseApi}/room/${roomNum}/detail.json?v=${Date.now()}`;
   try {
-    const text = await get(url);
+    const text = await get(url, referer);
     const json = parseJsonp(text);
     if (json.code !== 200) return [];
     const s    = json.data?.stream || {};
     const seen = new Set();
     const urls = [];
 
-    const add = (val, quality) => {
+    const add = (val, quality, priority) => {
       if (val && typeof val === 'string' && !seen.has(val)) {
         seen.add(val);
-        urls.push({ url: val, quality });
+        urls.push({ url: val, quality, priority });
       }
     };
 
-    // Known priority fields first
-    add(s.hdM3u8, 'HD');
-    add(s.m3u8,   'SD');
-    add(s.hdFlv,  'HD');
-    add(s.flv,    'SD');
+    // Priority: HD m3u8 > SD m3u8 > HD FLV > SD FLV
+    add(s.hdM3u8, 'HD', 4);
+    add(s.m3u8,   'SD', 3);
+    add(s.hdFlv,  'HD', 2);
+    add(s.flv,    'SD', 1);
 
-    // Scan every remaining string field for any m3u8 / flv URL
+    // Catch any extra stream fields not covered above
     for (const [key, val] of Object.entries(s)) {
       if (typeof val !== 'string') continue;
       if (!val.includes('.m3u8') && !val.includes('.flv')) continue;
-      const isHD = /hd|high|1080|720/i.test(key) || /hd|high|1080|720/i.test(val);
-      add(val, isHD ? 'HD' : 'SD');
+      const isHD  = /hd|high|1080|720/i.test(key) || /hd|high|1080|720/i.test(val);
+      const isM3u8 = val.includes('.m3u8');
+      add(val, isHD ? 'HD' : 'SD', isHD && isM3u8 ? 4 : isM3u8 ? 3 : isHD ? 2 : 1);
     }
 
     return urls;
@@ -177,30 +174,13 @@ const getTabId = async () => {
   return cachedTabId;
 };
 
-const saveRoom = async (room, streams, tabId, schedule) => {
-  const sourceId = String(room.roomNum);
-  const sched    = schedule?.get(sourceId);
-
-  // Prefer schedule data (has proper team names + logos); fall back to title parsing
-  let home_team, away_team, league, home_logo, away_logo;
-  if (sched) {
-    home_team = sched.home_team || '';
-    away_team = sched.away_team || '';
-    league    = sched.league;
-    home_logo = sched.home_logo;
-    away_logo = sched.away_logo;
-  } else {
-    const parsed   = parseTitle(room.title);
-    home_team      = parsed.home_team;
-    away_team      = parsed.away_team;
-    league         = parsed.league || null;
-    const cover    = room.cutOutCustomCoverUrl || room.cover || null;
-    const resolved = await resolveLogos(home_team, away_team, cover, cover);
-    home_logo      = resolved.home_logo;
-    away_logo      = resolved.away_logo;
-  }
-
-  const title = home_team && away_team ? `${home_team} vs ${away_team}` : room.title;
+const saveMatch = async (sched, streams, tabId, sourceId) => {
+  const home_team = sched.home_team || '';
+  const away_team = sched.away_team || '';
+  const title     = home_team && away_team ? `${home_team} vs ${away_team}` : home_team;
+  const league    = sched.league || null;
+  const home_logo = sched.home_logo || null;
+  const away_logo = sched.away_logo || null;
 
   const existing = await db.query(
     'SELECT id FROM matches WHERE source_match_id = $1 AND source_name = $2 LIMIT 1',
@@ -211,26 +191,25 @@ const saveRoom = async (room, streams, tabId, schedule) => {
   if (existing.rows.length > 0) {
     matchId = existing.rows[0].id;
     await db.query(
-      `UPDATE matches SET status=$1, title=$2, home_team=$3, away_team=$4,
-       home_logo=$5, away_logo=$6, league=$7 WHERE id=$8`,
-      ['live', title, home_team || room.title, away_team || '', home_logo, away_logo, league || null, matchId]
+      `UPDATE matches SET status='live', title=$1, home_team=$2, away_team=$3,
+       home_logo=$4, away_logo=$5, league=$6 WHERE id=$7`,
+      [title, home_team, away_team, home_logo, away_logo, league, matchId]
     );
   } else {
     const ins = await db.query(
       `INSERT INTO matches
-         (tab_id, title, home_team, away_team, home_logo, away_logo, league, status, scheduled_at,
-          source_match_id, source_name, created_at)
+         (tab_id, title, home_team, away_team, home_logo, away_logo, league, status,
+          scheduled_at, source_match_id, source_name, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'live',now(),$8,'chinalive',now())
        RETURNING id`,
-      [tabId, title, home_team || room.title, away_team || '', home_logo, away_logo, league || null, sourceId]
+      [tabId, title, home_team, away_team, home_logo, away_logo, league, sourceId]
     );
     matchId = ins.rows[0].id;
   }
 
-  // Upsert stream URLs — match on base URL (ignore auth_key) to avoid duplicates
   for (const s of streams) {
     const ex = await db.query(
-      "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1) = split_part($2,'?',1) LIMIT 1",
+      "SELECT id, is_healthy FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1) = split_part($2,'?',1) LIMIT 1",
       [matchId, s.url]
     );
     if (ex.rows.length === 0) {
@@ -238,13 +217,18 @@ const saveRoom = async (room, streams, tabId, schedule) => {
         `INSERT INTO stream_urls
            (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
          VALUES ($1,$2,$3,'chinalive',$4,true,NOW()+interval '50 minutes',now())`,
-        [matchId, s.url, s.quality, s.quality === 'HD' ? 2 : 1]
+        [matchId, s.url, s.quality, s.priority ?? (s.quality === 'HD' ? 2 : 1)]
       );
     } else {
+      // Always update CDN URL (refreshes auth_key) and priority — players use stable proxy URLs
       await db.query(
-        `UPDATE stream_urls SET url=$1, expires_at=NOW()+interval '50 minutes', is_healthy=true
-         WHERE id=$2`,
-        [s.url, ex.rows[0].id]
+        `UPDATE stream_urls
+         SET url = $1,
+             priority = $2,
+             expires_at = NOW() + interval '50 minutes',
+             is_healthy = true
+         WHERE id = $3`,
+        [s.url, s.priority ?? (s.quality === 'HD' ? 2 : 1), ex.rows[0].id]
       );
     }
   }
@@ -273,26 +257,66 @@ const run = async () => {
 
   const { api_base, referer } = await getSourceConfig();
 
-  // Fetch schedule and rooms in parallel
-  const [schedule, rooms] = await Promise.all([
-    fetchSchedule(api_base, referer),
-    fetchRooms(api_base, referer).catch((err) => { console.error('[chinalive] Failed to fetch room list:', err.message); return null; }),
+  // Fetch schedule and live rooms in parallel
+  const [scheduleMatches, roomMap] = await Promise.all([
+    fetchScheduleMatches(api_base, referer),
+    fetchRooms(api_base, referer).catch((err) => {
+      console.error('[chinalive] Failed to fetch rooms:', err.message);
+      return null;
+    }),
   ]);
-  if (!rooms) return;
-  console.log(`[chinalive] Found ${rooms.length} live sport rooms`);
+  if (!roomMap) return;
+
+  console.log(`[chinalive] ${scheduleMatches.length} scheduled matches, ${roomMap.size} live rooms`);
 
   const activeIds = [];
 
-  for (const room of rooms) {
+  for (const match of scheduleMatches) {
+    // Collect all live anchor rooms for this match
+    const liveRoomNums = [];
+    for (const anchor of match.anchors || []) {
+      const rn = String(anchor.anchor?.roomNum || anchor.roomNum || '');
+      if (rn && roomMap.has(rn)) liveRoomNums.push(rn);
+    }
+    if (liveRoomNums.length === 0) continue; // not live yet
+
+    const sourceId = String(match.scheduleId);
+    const sched = {
+      home_team: match.hostName  || '',
+      away_team: match.guestName || '',
+      league:    match.subCateName || null,
+      home_logo: absoluteLogo(match.hostIcon),
+      away_logo: absoluteLogo(match.guestIcon),
+    };
+
     try {
-      const streams = await fetchStreams(room.roomNum);
-      await saveRoom(room, streams, tabId, schedule);
-      activeIds.push(String(room.roomNum));
-      const sched = schedule.get(String(room.roomNum));
-      const label = sched ? `${sched.home_team} vs ${sched.away_team}` : room.title;
-      console.log(`[chinalive] Saved "${label}" (${streams.length} streams)`);
+      // Sort anchors by viewCount — rank 0 = most popular (most stable)
+      const sortedRooms = liveRoomNums
+        .map((rn) => ({ rn, views: roomMap.get(rn)?.viewCount || 0 }))
+        .sort((a, b) => b.views - a.views);
+
+      const allStreams = [];
+      for (let rank = 0; rank < sortedRooms.length; rank++) {
+        await jitter(300, 900); // avoid rapid-fire requests per room
+        const streams = await fetchStreams(sortedRooms[rank].rn, api_base, referer).catch(() => []);
+        for (const s of streams) {
+          const isHLS = s.url.includes('.m3u8');
+          // FLV only from the best anchor — it's a last resort, no need to multiply across anchors
+          if (!isHLS && rank > 0) continue;
+          // Priority ladder: HD HLS anchors → SD HLS anchors → HD FLV → SD FLV
+          const priority = isHLS && s.quality === 'HD' ? 10 - rank
+                         : isHLS                       ?  6 - rank
+                         : s.quality === 'HD'          ?  3
+                         :                                2;
+          allStreams.push({ ...s, priority });
+        }
+      }
+
+      await saveMatch(sched, allStreams, tabId, sourceId);
+      activeIds.push(sourceId);
+      console.log(`[chinalive] Saved "${sched.home_team} vs ${sched.away_team}" — ${allStreams.length} streams from ${sortedRooms.length} anchor(s)`);
     } catch (err) {
-      console.error(`[chinalive] Error processing room ${room.roomNum}:`, err.message);
+      console.error(`[chinalive] Error processing match ${sourceId}:`, err.message);
     }
   }
 

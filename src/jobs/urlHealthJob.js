@@ -2,9 +2,22 @@ const db = require('../config/database');
 const { run: rerunSoco }  = require('../scrapers/socolive');
 const { run: rerunChina } = require('../scrapers/chinalive');
 
-const CHECK_INTERVAL_MS = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 10 * 60 * 1000;
-const FAIL_THRESHOLD    = parseInt(process.env.HEALTH_FAIL_THRESHOLD, 10)    || 10;
-const FETCH_TIMEOUT_MS  = 8000;
+const DEFAULT_INTERVAL_MS  = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 10 * 60 * 1000;
+const DEFAULT_failThreshold = parseInt(process.env.HEALTH_failThreshold, 10)  || 10;
+const FETCH_TIMEOUT_MS = 8000;
+
+const getHealthConfig = async () => {
+  try {
+    const r = await db.query("SELECT value FROM app_config WHERE key = 'health' LIMIT 1");
+    const cfg = r.rows[0]?.value || {};
+    return {
+      intervalMs:    (cfg.interval_ms    >= 30000) ? cfg.interval_ms    : DEFAULT_INTERVAL_MS,
+      failThreshold: (cfg.fail_threshold >= 1)     ? cfg.fail_threshold : DEFAULT_failThreshold,
+    };
+  } catch (_) {
+    return { intervalMs: DEFAULT_INTERVAL_MS, failThreshold: DEFAULT_failThreshold };
+  }
+};
 
 const checkUrl = async (url) => {
   const controller = new AbortController();
@@ -33,7 +46,7 @@ const tryRerun = async (fn, label) => {
   try { await fn(); } catch (err) { console.error(`[urlHealthJob] ${label} re-scrape failed:`, err.message); }
 };
 
-const runHealthCheck = async () => {
+const runHealthCheck = async (failThreshold) => {
   console.log('[urlHealthJob] Starting health check…');
 
   const { rows: streams } = await db.query(
@@ -68,12 +81,12 @@ const runHealthCheck = async () => {
            last_checked = NOW(),
            latency_ms   = COALESCE($4, latency_ms)
        WHERE id = $3`,
-      [ok && newFailCount < FAIL_THRESHOLD, newFailCount, stream.id, latency]
+      [ok && newFailCount < failThreshold, newFailCount, stream.id, latency]
     );
 
     if (!ok) {
       console.warn(`[urlHealthJob] UNHEALTHY: ${stream.url} (fail_count=${newFailCount})`);
-      if (newFailCount >= FAIL_THRESHOLD) {
+      if (newFailCount >= failThreshold) {
         if (stream.source_name === 'socolive')  socoFailed  = true;
         if (stream.source_name === 'chinalive') chinaFailed = true;
       }
@@ -98,15 +111,17 @@ const expireOldUrls = async () => {
 const start = () => {
   const tick = async () => {
     try {
+      const { intervalMs, failThreshold } = await getHealthConfig();
       await expireOldUrls();
-      await runHealthCheck();
+      await runHealthCheck(failThreshold);
+      setTimeout(tick, intervalMs);
     } catch (err) {
       console.error('[urlHealthJob] Error:', err.message);
+      setTimeout(tick, DEFAULT_INTERVAL_MS);
     }
   };
 
   tick();
-  setInterval(tick, CHECK_INTERVAL_MS);
 };
 
 start();

@@ -5,10 +5,31 @@ const { resolveLogos } = require('../services/teamLogos');
 
 chromium.use(StealthPlugin());
 
+// ─── Config ───────────────────────────────────────────────────────────────────
+
+// Discovery seed — most stable SEO domain; always has an <link rel="alternate"> to the active mirror
+const DISCOVERY_URL = 'https://s2sprediction.net/';
+
 const SOCO_DEFAULTS = [
   process.env.SOCO_BASE_URL   || 'https://www.socolive.tv',
-  process.env.SOCO_BASE_URL_2 || 'https://www.barbaramassaad.com',
+  process.env.SOCO_BASE_URL_2 || 'https://s2sprediction.net',
 ];
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+];
+const randomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
+const PROXY_URL = process.env.SCRAPER_PROXY || null;
+
+// Sports status codes from the fb-api (2–7 = live/in-progress)
+const LIVE_STATUSES = new Set([2, 3, 4, 5, 6, 7]);
+
+// ─── DB helpers ───────────────────────────────────────────────────────────────
 
 const getBaseUrls = async () => {
   try {
@@ -21,38 +42,226 @@ const getBaseUrls = async () => {
   return SOCO_DEFAULTS;
 };
 
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const delay = (min = 2000, max = 4000) => {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise((r) => setTimeout(r, ms));
+const saveDiscoveredUrl = async (url) => {
+  try {
+    await db.query(
+      `UPDATE sources
+       SET config = jsonb_set(config, '{base_urls}', $1::jsonb)
+       WHERE slug = 'socolive'`,
+      [JSON.stringify([url, DISCOVERY_URL])]
+    );
+    console.log(`[socolive] Auto-saved new mirror to DB: ${url}`);
+  } catch (err) {
+    console.warn('[socolive] Could not save discovered URL:', err.message);
+  }
 };
 
-const isStartingSoon = (match) => {
-  if (!match.scheduled_at) return false;
-  const diff = new Date(match.scheduled_at) - Date.now();
-  return diff > 0 && diff <= 30 * 60 * 1000;
+let cachedTabId = null;
+const getTabId = async () => {
+  if (cachedTabId) return cachedTabId;
+  const r = await db.query("SELECT id FROM tabs WHERE slug = 'soco-live' LIMIT 1");
+  cachedTabId = r.rows[0]?.id || null;
+  return cachedTabId;
 };
 
-const parseMatchTime = (raw) => {
-  if (!raw) return null;
-  const m = raw.match(/(\d{1,2}):(\d{2})(?:\s+(\d{1,2})\/(\d{1,2}))?/);
-  if (!m) return null;
-  const now   = new Date();
-  const month = m[4] ? parseInt(m[4], 10) - 1 : now.getMonth();
-  const day   = m[3] ? parseInt(m[3], 10)     : now.getDate();
-  return new Date(now.getFullYear(), month, day, parseInt(m[1], 10), parseInt(m[2], 10), 0).toISOString();
+// ─── Browser factory ──────────────────────────────────────────────────────────
+
+const newBrowser = () => {
+  const args = [
+    '--no-sandbox', '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage', '--disable-gpu',
+    '--disable-blink-features=AutomationControlled',
+  ];
+  if (PROXY_URL) args.push(`--proxy-server=${PROXY_URL}`);
+  return chromium.launch({ headless: true, args });
 };
 
-const classifyQuality = (url) => {
-  if (/_hd|_lhd|720|1080|uhd|hi/i.test(url)) return 'HD';
-  return 'SD';
+const newContext = (browser) =>
+  browser.newContext({
+    userAgent: randomUA(),
+    viewport: { width: 1366, height: 768 },
+    locale: 'en-US',
+    timezoneId: 'Asia/Bangkok',
+  });
+
+// ─── Auto-discovery ───────────────────────────────────────────────────────────
+// Visits the stable DISCOVERY_URL and reads <link rel="alternate"> to find
+// the current active mirror. Saves it to the DB so next run uses it directly.
+
+const discoverMirror = async () => {
+  console.log('[socolive] Trying auto-discovery via', DISCOVERY_URL);
+  const browser = await newBrowser();
+  const ctx     = await newContext(browser);
+  try {
+    const page = await ctx.newPage();
+    await page.goto(DISCOVERY_URL, { waitUntil: 'domcontentloaded', timeout: 25000 });
+
+    // Extract <link rel="alternate" media="only screen and (max-width: 640px)" href="...">
+    const discovered = await page.evaluate(() => {
+      const link = document.querySelector('link[rel="alternate"][media]');
+      return link ? link.href : null;
+    });
+
+    if (discovered && discovered.startsWith('http')) {
+      console.log('[socolive] Discovered mirror:', discovered);
+      await saveDiscoveredUrl(discovered);
+      return discovered;
+    }
+
+    // Fallback: check if the discovery URL itself serves match data
+    const hasMatches = await page.evaluate(() =>
+      document.querySelectorAll('.match-item').length > 0
+    );
+    if (hasMatches) return DISCOVERY_URL;
+
+    return null;
+  } catch (err) {
+    console.warn('[socolive] Auto-discovery failed:', err.message);
+    return null;
+  } finally {
+    await ctx.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
 };
 
-// Parse token expiry embedded in CDN URLs (auth_key=<unix_ts>-...)
+// ─── Part 1: fetchMatchList via XHR interception ─────────────────────────────
+// Instead of scraping HTML selectors, we intercept the JSON API response that
+// the site's JavaScript fetches — immune to CSS/HTML redesigns.
+
+const fetchMatchList = async (baseUrl) => {
+  const browser = await newBrowser();
+  const ctx     = await newContext(browser);
+  const matches = [];
+  let   resolved = false;
+
+  return new Promise(async (resolve) => {
+    const finish = (result) => {
+      if (!resolved) { resolved = true; resolve(result); }
+    };
+    // Timeout safety
+    const timeout = setTimeout(() => finish(matches), 35000);
+
+    try {
+      // Intercept XHR/fetch responses from the football API
+      ctx.on('response', async (res) => {
+        const url = res.url();
+        if (!url.includes('apiscoreflow.com/football')) return;
+        try {
+          const json = await res.json();
+          const stages = json?.Stages || json?.data?.Stages || [];
+          for (const stage of stages) {
+            for (const event of (stage.Events || [])) {
+              const status = event.Eps ?? event.status ?? 0;
+              matches.push({
+                sourceId:   String(event.Eid || event.id || ''),
+                title:      `${event.T1?.[0]?.Nm || ''} vs ${event.T2?.[0]?.Nm || ''}`,
+                home_team:  event.T1?.[0]?.Nm  || '',
+                away_team:  event.T2?.[0]?.Nm  || '',
+                home_logo:  event.T1?.[0]?.Img ? `https://lsm-static-prod.livescore.com/medium/${event.T1[0].Img}` : null,
+                away_logo:  event.T2?.[0]?.Img ? `https://lsm-static-prod.livescore.com/medium/${event.T2[0].Img}` : null,
+                league:     stage.Snm || null,
+                status:     LIVE_STATUSES.has(status) ? 'live' : 'scheduled',
+                score_home: event.Tr1 != null ? +event.Tr1 : null,
+                score_away: event.Tr2 != null ? +event.Tr2 : null,
+                elapsed:    event.Esd ? Math.floor((Date.now() - event.Esd) / 60000) : null,
+                matchPath:  event.slug || event.Scd || null,
+                isLive:     LIVE_STATUSES.has(status),
+              });
+            }
+          }
+          if (matches.length > 0) {
+            clearTimeout(timeout);
+            finish(matches);
+          }
+        } catch (_) {}
+      });
+
+      const page = await ctx.newPage();
+
+      // Block heavy assets — only need JS + XHR
+      await page.route('**/*', (route) => {
+        const type = route.request().resourceType();
+        if (['image', 'font', 'media', 'stylesheet'].includes(type)) return route.abort();
+        route.continue();
+      });
+
+      await page.goto(baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+      // If XHR interception got nothing, fall back to DOM scraping
+      if (matches.length === 0) {
+        await page.waitForSelector('.match-item', { timeout: 10000 }).catch(() => {});
+        const domMatches = await page.$$eval('.match-item', (cards, base) =>
+          cards.map((card) => {
+            const homeTeam = card.querySelector('.match-home .name-team-inner span')?.textContent.trim() || '';
+            const awayTeam = card.querySelector('.match-away .name-team-inner span')?.textContent.trim() || '';
+            const href     = card.querySelector('a.link-match')?.getAttribute('href') || null;
+            const slug     = href ? href.split('/').filter(Boolean).pop() : null;
+            const isLive   = card.getAttribute('is-live') === '1';
+            const hasLive  = card.getAttribute('has-live') === '1';
+            const sourceId = card.getAttribute('data-match-id') || slug;
+            const scoreRaw = card.querySelector('.score-match-data')?.textContent.trim() || null;
+            let score_home = null, score_away = null;
+            if (scoreRaw) {
+              const parts = scoreRaw.split('-').map((s) => parseInt(s.trim(), 10));
+              if (parts.length === 2 && !isNaN(parts[0])) { score_home = parts[0]; score_away = parts[1]; }
+            }
+            // Elapsed minutes — try multiple selectors
+            const timeRaw = card.querySelector('.time-text, .match-minute, [class*="minute"], [class*="time-live"]')?.textContent.trim() || null;
+            const elapsed = timeRaw ? (parseInt(timeRaw.replace(/[^0-9]/g, ''), 10) || null) : null;
+
+            // Scheduled time — parse from raw text
+            const rawTime = card.querySelector('.match-item__time span, .match-time')?.textContent.trim() || null;
+
+            return {
+              sourceId, slug,
+              title:      `${homeTeam} vs ${awayTeam}`,
+              home_team:  homeTeam, away_team: awayTeam,
+              home_logo:  card.querySelector('.logo-home img')?.src || null,
+              away_logo:  card.querySelector('.logo-away img')?.src || null,
+              league:     card.querySelector('.match-item__comp, .competition-name, [class*="league"]')?.textContent.trim() || null,
+              status:     isLive ? 'live' : 'scheduled',
+              score_home, score_away,
+              elapsed,    rawTime,
+              isLive,     hasLive,
+              matchPath:  href ? (href.startsWith('http') ? href : `${base}${href}`) : null,
+            };
+          }), baseUrl
+        ).catch(() => []);
+        matches.push(...domMatches);
+      }
+
+      clearTimeout(timeout);
+      finish(matches);
+    } catch (err) {
+      clearTimeout(timeout);
+      console.warn(`[socolive] fetchMatchList failed (${baseUrl}):`, err.message);
+      finish(matches);
+    } finally {
+      await ctx.close().catch(() => {});
+      await browser.close().catch(() => {});
+    }
+  });
+};
+
+// ─── Part 2: fetchStreamUrls via network interception ────────────────────────
+// Visits the match page and captures .m3u8 / .flv CDN URLs from network traffic.
+// Video bytes NEVER flow through our server — we only record the public CDN URL.
+
+const STREAM_CDNS = ['pull.niur.live', 'pull.niues.live', 'pull.niup.live'];
+
+const isStreamUrl = (url) => {
+  if (!url || url.length > 2000) return false;
+  // Block static assets and raw .ts segment files (not playlists)
+  if (/\.(js|css|png|jpg|jpeg|gif|ico|woff|woff2|svg|webp|ts)(\?|$)/i.test(url)) return false;
+  // From known CDNs only accept .m3u8 playlists or .flv
+  if (STREAM_CDNS.some((cdn) => url.includes(cdn))) {
+    return url.includes('.m3u8') || url.includes('.flv') || url.includes('playlist');
+  }
+  return url.includes('.m3u8') || url.includes('.flv');
+};
+
+const classifyQuality = (url) => /hd|720|1080|high/i.test(url) ? 'HD' : 'SD';
+
 const parseTokenExpiry = (url) => {
   const m = url.match(/auth_key=(\d{10})/);
   if (m) {
@@ -62,225 +271,66 @@ const parseTokenExpiry = (url) => {
   return null;
 };
 
-// Known SOCO stream CDN domains
-const STREAM_CDNS = [
-  'pull.niur.live',
-  'pull.niues.live',
-];
-
-const isStreamUrl = (url) => {
-  if (!url || url.length > 2000) return false;
-  if (/\.(js|css|png|jpg|jpeg|gif|ico|woff|woff2|svg|webp)(\?|$)/i.test(url)) return false;
-  if (STREAM_CDNS.some((cdn) => url.includes(cdn))) return true;
-  return (
-    url.includes('.m3u8') ||
-    url.includes('.flv')  ||
-    (url.includes('playlist') && !url.includes('.js')) ||
-    (/\/stream\//i.test(url) && !url.includes('.js'))
-  );
-};
-
-const extractFromPageSource = async (page) => {
-  const found = new Set();
-  try {
-    const content = await page.content();
-    const patterns = [
-      /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/g,
-      /https?:\/\/[^\s"'<>]+\.flv[^\s"'<>]*/g,
-      ...STREAM_CDNS.map(
-        (cdn) => new RegExp(`https?:\\/\\/${cdn.replace('.', '\\.')}[^\\s"'<>]*`, 'g')
-      ),
-    ];
-    for (const re of patterns) {
-      for (const match of content.matchAll(re)) {
-        const url = match[0].replace(/['"\\]+$/, '');
-        if (isStreamUrl(url)) found.add(url);
-      }
-    }
-  } catch (_) {}
-  return [...found];
-};
-
-const newBrowser = () =>
-  chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-  });
-
-// ─── Part 1: fetchMatchList ───────────────────────────────────────────────────
-
-const fetchMatchList = async (baseUrl = BASE_URLS[0]) => {
-  const browser = await newBrowser();
-  const context = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 720 } });
-  const page    = await context.newPage();
-
-  await page.route('**/*', (route) => {
-    const type = route.request().resourceType();
-    if (['image', 'font', 'stylesheet', 'media'].includes(type)) route.abort();
-    else route.continue();
-  });
-
-  try {
-    console.log(`[socolive] Loading match list: ${baseUrl}/`);
-    await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForSelector('.match-item', { timeout: 15000 }).catch(() => {});
-
-    const matches = await page.$$eval('.match-item', (cards, baseUrl) =>
-      cards.map((card) => {
-        const homeTeam    = card.querySelector('.match-home .name-team-inner span')?.textContent.trim() || '';
-        const awayTeam    = card.querySelector('.match-away .name-team-inner span')?.textContent.trim() || '';
-        const homeLogo    = card.querySelector('.logo-home img')?.getAttribute('src') || null;
-        const awayLogo    = card.querySelector('.logo-away img')?.getAttribute('src') || null;
-        const rawTime     = card.querySelector('.match-item__time span')?.textContent.trim() || null;
-        const competition = card.querySelector('.match-item__comp')?.textContent.trim() || null;
-        const href        = card.querySelector('a.link-match')?.getAttribute('href') || null;
-        const slug        = href ? href.split('/').filter(Boolean).pop() : null;
-        const isLive      = card.getAttribute('is-live') === '1';
-        const hasLive     = card.getAttribute('has-live') === '1';
-        const sourceId    = card.getAttribute('data-match-id') || slug;
-
-        const runningText  = card.querySelector('.match-running')?.textContent.trim() || '';
-        const statusByText = /trực tiếp|đang diễn ra/i.test(runningText) ? 'live' : null;
-        const status       = isLive ? 'live' : (statusByText || 'scheduled');
-
-        const scoreRaw = card.querySelector('.score-match-data')?.textContent.trim() || null;
-        let score_home = null, score_away = null;
-        if (scoreRaw) {
-          const parts = scoreRaw.split('-').map((s) => parseInt(s.trim(), 10));
-          if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            score_home = parts[0];
-            score_away = parts[1];
-          }
-        }
-
-        const timeText        = card.querySelector('.time-text')?.textContent.trim() || null;
-        const elapsed_minutes = timeText ? parseInt(timeText.replace(/[^0-9]/g, ''), 10) || null : null;
-
-        const matchUrl = href
-          ? href.startsWith('http') ? href : `${baseUrl}${href}`
-          : null;
-
-        return {
-          slug, sourceId,
-          title:     `${homeTeam} vs ${awayTeam}`,
-          home_team: homeTeam,
-          away_team: awayTeam,
-          home_logo: homeLogo,
-          away_logo: awayLogo,
-          rawTime, competition, status, hasLive, matchUrl,
-          score_home, score_away, elapsed_minutes,
-        };
-      }),
-      baseUrl
-    );
-
-    console.log(`[socolive] Found ${matches.length} matches on ${baseUrl}`);
-    return matches;
-  } finally {
-    await context.close();
-    await browser.close();
-  }
-};
-
-// ─── Part 2: fetchStreamUrls ──────────────────────────────────────────────────
-
 const PLAY_SELECTORS = [
   '.play-btn', '[class*="play-btn"]', '[class*="btnPlay"]',
   'button[aria-label*="play" i]', '.jw-icon-display', '.vjs-big-play-button',
   '[class*="player"] button', 'video',
 ];
 
-const clickPlay = async (p) => {
-  for (const sel of PLAY_SELECTORS) {
-    try {
-      const el = await p.$(sel);
-      if (el) { await el.click({ timeout: 2000 }); return true; }
-    } catch (_) {}
-  }
-  return false;
-};
-
 const fetchStreamUrls = async (matchUrl) => {
   const browser = await newBrowser();
-  const context = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 720 } });
+  const ctx     = await newContext(browser);
   const found   = new Set();
 
-  // Context-level listeners catch requests from ALL pages and cross-origin iframes
-  context.on('request',  (req) => { try { if (isStreamUrl(req.url())) found.add(req.url()); } catch (_) {} });
-  context.on('response', (res) => { try { if (isStreamUrl(res.url())) found.add(res.url()); } catch (_) {} });
+  ctx.on('request',  (req) => { try { if (isStreamUrl(req.url()))  found.add(req.url()); } catch (_) {} });
+  ctx.on('response', (res) => { try { if (isStreamUrl(res.url()))  found.add(res.url()); } catch (_) {} });
 
   try {
-    console.log(`[socolive] Fetching streams: ${matchUrl}`);
-    const page = await context.newPage();
+    const page = await ctx.newPage();
     await page.goto(matchUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(4000);
 
-    await clickPlay(page);
+    // Click play buttons
+    for (const sel of PLAY_SELECTORS) {
+      try { const el = await page.$(sel); if (el) { await el.click({ timeout: 2000 }); break; } } catch (_) {}
+    }
     await page.waitForTimeout(3000);
 
-    const iframeSrcs = await page.$$eval(
-      'iframe[src]',
-      (els) => els.map((e) => e.src).filter((s) => s && s.startsWith('http'))
+    // Visit iframes
+    const iframeSrcs = await page.$$eval('iframe[src]',
+      (els) => els.map((e) => e.src).filter((s) => s?.startsWith('http'))
     ).catch(() => []);
 
     for (const src of iframeSrcs) {
       try {
-        console.log(`[socolive] Visiting iframe src: ${src}`);
-        const iframePage = await context.newPage();
+        const iframePage = await ctx.newPage();
         await iframePage.goto(src, { waitUntil: 'load', timeout: 20000 }).catch(() => {});
-        await iframePage.waitForTimeout(4000);
-        await clickPlay(iframePage);
-        await iframePage.waitForTimeout(5000);
-
-        if (found.size === 0) {
-          const fromSource = await extractFromPageSource(iframePage);
-          fromSource.forEach((u) => found.add(u));
+        await iframePage.waitForTimeout(3000);
+        for (const sel of PLAY_SELECTORS) {
+          try { const el = await iframePage.$(sel); if (el) { await el.click({ timeout: 2000 }); break; } } catch (_) {}
         }
-
-        await iframePage.close();
+        await iframePage.waitForTimeout(4000);
+        await iframePage.close().catch(() => {});
       } catch (_) {}
     }
 
-    // Fallback: scan main page source for embedded stream URLs
-    if (found.size === 0) {
-      const fromSource = await extractFromPageSource(page);
-      fromSource.forEach((u) => found.add(u));
-    }
-
-    // Final wait for any delayed CDN requests
-    await page.waitForTimeout(3000);
-
-    const results = [...found].map((url) => ({ url, quality: classifyQuality(url) }));
-    console.log(`[socolive] Captured ${results.length} stream URL(s) for ${matchUrl}`);
-    return results;
+    await page.waitForTimeout(2000);
+    return [...found].map((url) => ({ url, quality: classifyQuality(url) }));
   } catch (err) {
-    console.warn(`[socolive] Stream fetch error for ${matchUrl}: ${err.message}`);
+    console.warn(`[socolive] Stream fetch error (${matchUrl}):`, err.message);
     return [];
   } finally {
-    await context.close();
-    await browser.close();
+    await ctx.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 };
 
 // ─── Part 3: saveMatchToDB ────────────────────────────────────────────────────
 
-let cachedTabId = null;
-const getTabId = async () => {
-  if (cachedTabId) return cachedTabId;
-  const res = await db.query("SELECT id FROM tabs WHERE slug = 'soco-live' LIMIT 1");
-  cachedTabId = res.rows[0]?.id || null;
-  return cachedTabId;
-};
-
-const saveMatchToDB = async (match) => {
-  const tab_id = await getTabId();
-  if (!tab_id) { console.warn('[socolive] soco-live tab not found'); return; }
-
-  const scheduled_at = parseMatchTime(match.rawTime);
+const saveMatchToDB = async (match, tabId) => {
   const { home_logo, away_logo } = await resolveLogos(
     match.home_team, match.away_team, match.home_logo, match.away_logo
   );
-  const league = match.competition || null;
 
   const existing = await db.query(
     'SELECT id FROM matches WHERE source_match_id = $1 AND source_name = $2 LIMIT 1',
@@ -288,106 +338,158 @@ const saveMatchToDB = async (match) => {
   );
 
   let matchId;
-  if (existing.rows.length > 0) {
+  if (existing.rows.length) {
     matchId = existing.rows[0].id;
     await db.query(
       `UPDATE matches
-         SET status = $1, scheduled_at = $2,
-             score_home = $3, score_away = $4, elapsed_minutes = $5,
-             home_logo = $6, away_logo = $7, league = $8
-       WHERE id = $9`,
-      [match.status, scheduled_at, match.score_home, match.score_away,
-       match.elapsed_minutes, home_logo, away_logo, league, matchId]
+         SET status = $1, score_home = $2, score_away = $3,
+             elapsed_minutes = $4, home_logo = $5, away_logo = $6,
+             league = COALESCE($7, league)
+       WHERE id = $8`,
+      [match.status, match.score_home, match.score_away,
+       match.elapsed ?? null, home_logo, away_logo, match.league || null, matchId]
     );
   } else {
     const ins = await db.query(
       `INSERT INTO matches
          (tab_id, title, home_team, away_team, home_logo, away_logo, league,
-          status, scheduled_at, source_match_id, source_name,
-          score_home, score_away, elapsed_minutes, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'socolive',$11,$12,$13,now())
+          status, source_match_id, source_name, score_home, score_away, elapsed_minutes, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'socolive',$10,$11,$12,now())
        RETURNING id`,
-      [
-        tab_id, match.title,
-        match.home_team || '', match.away_team || '',
-        home_logo, away_logo, league,
-        match.status, scheduled_at, match.sourceId,
-        match.score_home, match.score_away, match.elapsed_minutes,
-      ]
+      [tabId, match.title, match.home_team, match.away_team,
+       home_logo, away_logo, match.league, match.status,
+       match.sourceId, match.score_home, match.score_away, match.elapsed]
     );
     matchId = ins.rows[0].id;
   }
 
-  if (!match.streams || match.streams.length === 0) return;
+  if (!match.streams?.length) return;
 
   for (const stream of match.streams) {
-    // Honour token expiry from the URL; default to 2 hours if not parseable
-    const tokenExpiry = parseTokenExpiry(stream.url);
-    const expiresAt   = tokenExpiry || new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const expiresAt = parseTokenExpiry(stream.url)
+      || new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 
-    const existing = await db.query(
-      "SELECT id FROM stream_urls WHERE match_id = $1 AND split_part(url,'?',1) = split_part($2,'?',1) LIMIT 1",
+    const dup = await db.query(
+      "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1)=split_part($2,'?',1) LIMIT 1",
       [matchId, stream.url]
     );
-
-    if (existing.rows.length === 0) {
+    if (dup.rows.length) {
+      await db.query(
+        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true WHERE id=$3',
+        [stream.url, expiresAt, dup.rows[0].id]
+      );
+    } else {
       await db.query(
         `INSERT INTO stream_urls
            (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
          VALUES ($1,$2,$3,'socolive',$4,true,$5,now())`,
         [matchId, stream.url, stream.quality, stream.quality === 'HD' ? 2 : 1, expiresAt]
       );
-    } else {
-      await db.query(
-        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true WHERE id=$3',
-        [stream.url, expiresAt, existing.rows[0].id]
-      );
     }
   }
 
-  console.log(`[socolive] Saved ${match.streams.length} streams for "${match.title}"`);
+  console.log(`[socolive] Saved "${match.title}" — ${match.streams.length} streams`);
 };
 
-// ─── Part 4: run ─────────────────────────────────────────────────────────────
+// ─── Mark old matches as finished ────────────────────────────────────────────
+
+const markFinished = async (activeSourceIds, tabId) => {
+  if (!tabId) return;
+  // Primary: mark by source_match_id not in current scrape
+  if (activeSourceIds.length) {
+    const placeholders = activeSourceIds.map((_, i) => `$${i + 2}`).join(',');
+    await db.query(
+      `UPDATE matches SET status = 'finished'
+       WHERE tab_id = $1
+         AND source_name = 'socolive'
+         AND status = 'live'
+         AND source_match_id NOT IN (${placeholders})`,
+      [tabId, ...activeSourceIds]
+    );
+  }
+  // Safety net: any socolive live match not updated in 15+ min is stale
+  await db.query(
+    `UPDATE matches SET status = 'finished'
+     WHERE tab_id = $1
+       AND source_name = 'socolive'
+       AND status = 'live'
+       AND created_at < NOW() - INTERVAL '15 minutes'`,
+    [tabId]
+  );
+};
+
+// ─── Main run ─────────────────────────────────────────────────────────────────
 
 const run = async () => {
   console.log('[socolive] Starting scrape…');
 
-  const BASE_URLS = await getBaseUrls();
+  const tabId = await getTabId();
+  if (!tabId) { console.warn('[socolive] soco-live tab not found'); return; }
+
+  // 1. Try each configured mirror in order
   let matches = null;
-  for (const baseUrl of BASE_URLS) {
+  const baseUrls = await getBaseUrls();
+
+  for (const url of baseUrls) {
     try {
-      const result = await fetchMatchList(baseUrl);
-      if (result && result.length > 0) { matches = result; break; }
-      console.warn(`[socolive] ${baseUrl} returned 0 matches, trying next…`);
+      console.log(`[socolive] Trying mirror: ${url}`);
+      const result = await fetchMatchList(url);
+      if (result.length > 0) {
+        matches = result;
+        console.log(`[socolive] Got ${matches.length} matches from ${url}`);
+        break;
+      }
+      console.warn(`[socolive] ${url} returned 0 matches`);
     } catch (err) {
-      console.warn(`[socolive] ${baseUrl} failed (${err.message}), trying next…`);
+      console.warn(`[socolive] ${url} failed:`, err.message);
+    }
+  }
+
+  // 2. All mirrors failed — auto-discover new URL
+  if (!matches || matches.length === 0) {
+    console.warn('[socolive] All mirrors failed — running auto-discovery…');
+    const discovered = await discoverMirror();
+    if (discovered && !baseUrls.includes(discovered)) {
+      try {
+        const result = await fetchMatchList(discovered);
+        if (result.length > 0) {
+          matches = result;
+          console.log(`[socolive] Auto-discovery success: ${discovered} (${matches.length} matches)`);
+        }
+      } catch (err) {
+        console.warn('[socolive] Discovered URL also failed:', err.message);
+      }
     }
   }
 
   if (!matches || matches.length === 0) {
-    console.error('[socolive] All source URLs failed or returned no matches');
+    console.error('[socolive] No matches found from any source — aborting');
     return;
   }
 
-  console.log(`[socolive] Processing ${matches.length} matches`);
+  // 3. Fetch stream URLs only for live matches (avoids unnecessary scraping)
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  const activeIds = [];
 
   for (const match of matches) {
     try {
-      match.streams = [];
-
-      if ((match.status === 'live' || isStartingSoon(match)) && match.hasLive && match.matchUrl) {
-        match.streams = await fetchStreamUrls(match.matchUrl);
+      if (match.isLive && match.matchPath) {
+        match.streams = await fetchStreamUrls(match.matchPath);
+        await delay(2000 + Math.random() * 2000);
+      } else {
+        match.streams = [];
       }
-
-      await saveMatchToDB(match);
-      await delay(2000, 4000);
+      await saveMatchToDB(match, tabId);
+      if (match.sourceId) activeIds.push(match.sourceId);
     } catch (err) {
       console.error(`[socolive] Error processing "${match.title}":`, err.message);
     }
   }
 
+  // Mark matches from previous scrapes that are no longer live as finished
+  await markFinished(activeIds, tabId);
+
   console.log('[socolive] Scrape complete');
 };
 
-module.exports = { run, fetchMatchList, fetchStreamUrls, saveMatchToDB };
+module.exports = { run, fetchMatchList, fetchStreamUrls, discoverMirror };
