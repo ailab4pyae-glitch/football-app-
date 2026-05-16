@@ -1,7 +1,8 @@
-const jwt        = require('jsonwebtoken');
-const db         = require('../config/database');
-const redis      = require('../config/redis');
-const scraperLog = require('../config/scraperLog');
+const jwt          = require('jsonwebtoken');
+const db           = require('../config/database');
+const redis        = require('../config/redis');
+const scraperLog   = require('../config/scraperLog');
+const scraperState = require('../config/scraperState');
 const { run: runChinalive } = require('../scrapers/chinalive');
 const { run: runSocolive  } = require('../scrapers/socolive');
 
@@ -451,25 +452,19 @@ module.exports = async function adminRoutes(fastify) {
       return { error: 'Unknown scraper slug' };
     }
 
-    const alreadyRunning = await redis.get(`scraper:running:${slug}`).catch(() => null);
-    if (alreadyRunning) {
+    if (scraperState.isRunning(slug)) {
       return { slug, status: 'already_running' };
     }
 
     scraperLog.clear(slug);
-    await redis.set(`scraper:running:${slug}`, Date.now().toString(), 'EX', 600).catch(() => {});
-    await redis.set(`scraper:last_run:${slug}`, Date.now().toString()).catch(() => {});
-
-    const saveResult = (status, message = null) =>
-      redis.set(`scraper:last_result:${slug}`, JSON.stringify({ status, at: Date.now(), message })).catch(() => {});
+    scraperState.start(slug);
 
     SCRAPER_RUNNERS[slug]()
-      .then(() => saveResult('ok'))
+      .then(() => scraperState.finish(slug, 'ok'))
       .catch((err) => {
         console.error(`[admin] Manual scrape ${slug} failed:`, err.message);
-        return saveResult('error', err.message);
-      })
-      .finally(() => redis.del(`scraper:running:${slug}`).catch(() => {}));
+        scraperState.finish(slug, 'error', err.message);
+      });
 
     reply.code(202);
     return { slug, status: 'started' };
@@ -477,25 +472,21 @@ module.exports = async function adminRoutes(fastify) {
 
   // ── Scraper: live logs ─────────────────────────────────────────────────────
   fastify.get('/api/admin/scrapers/:slug/logs', { preHandler: requireJwt }, async (request) => {
-    const { slug }  = request.params;
-    const since     = parseInt(request.query.since || '0', 10);
-    const lines     = scraperLog.read(slug, since);
-    const running   = !!(await redis.get(`scraper:running:${slug}`).catch(() => null));
-    return { slug, running, lines };
+    const { slug } = request.params;
+    const since    = parseInt(request.query.since || '0', 10);
+    return { slug, running: scraperState.isRunning(slug), lines: scraperLog.read(slug, since) };
   });
 
   // ── Scraper: status check ──────────────────────────────────────────────────
   fastify.get('/api/admin/scrapers/:slug/status', { preHandler: requireJwt }, async (request) => {
     const { slug } = request.params;
-    const [runningRaw, lastRunRaw] = await Promise.all([
-      redis.get(`scraper:running:${slug}`).catch(() => null),
-      redis.get(`scraper:last_run:${slug}`).catch(() => null),
-    ]);
+    const s = scraperState.get(slug);
     return {
       slug,
-      running:     !!runningRaw,
-      started_at:  runningRaw  ? new Date(parseInt(runningRaw,  10)).toISOString() : null,
-      last_run_at: lastRunRaw  ? new Date(parseInt(lastRunRaw,  10)).toISOString() : null,
+      running:     s.running    ?? false,
+      started_at:  s.startedAt  ? new Date(s.startedAt).toISOString()  : null,
+      last_run_at: s.lastRunAt  ? new Date(s.lastRunAt).toISOString()  : null,
+      last_result: s.lastResult ?? null,
     };
   });
 
