@@ -3,6 +3,41 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const db = require('../config/database');
 const { resolveLogos } = require('../services/teamLogos');
 
+// ─── League name normalisation (Vietnamese/Chinese → English) ─────────────────
+// Mirrors streamzone/lib/leagues.js so DB always stores English names
+const LEAGUE_TRANSLATIONS = [
+  ['ngoại hạng anh', 'Premier League'], ['giải ngoại hạng anh', 'Premier League'],
+  ['tây ban nha', 'La Liga'], ['la liga', 'La Liga'],
+  ['đức', 'Bundesliga'], ['bundesliga', 'Bundesliga'],
+  ['ý', 'Serie A'], ['serie a italia', 'Serie A'], ['serie a', 'Serie A'],
+  ['pháp', 'Ligue 1'], ['ligue 1', 'Ligue 1'],
+  ['champions league', 'Champions League'], ['cúp c1', 'Champions League'], ['liga champions', 'Champions League'],
+  ['europa league', 'Europa League'], ['cúp c2', 'Europa League'],
+  ['conference league', 'Conference League'],
+  ['world cup', 'World Cup'], ['copa america', 'Copa America'],
+  ['fa cup', 'FA Cup'], ['carabao', 'League Cup'], ['copa del rey', 'Copa del Rey'],
+  ['dfb', 'DFB Pokal'], ['coppa italia', 'Coppa Italia'], ['coupe de france', 'Coupe de France'],
+  ['eredivisie', 'Eredivisie'], ['primeira liga', 'Primeira Liga'],
+  ['mls', 'MLS'], ['saudi', 'Saudi Pro League'], ['brasileirao', 'Brasileirão'],
+  ['v.league', 'V.League'], ['vleague', 'V.League'],
+  ['thai league', 'Thai League'], ['myanmar', 'Myanmar National League'],
+  // Chinese
+  ['英超', 'Premier League'], ['西甲', 'La Liga'], ['德甲', 'Bundesliga'],
+  ['意甲', 'Serie A'], ['法甲', 'Ligue 1'], ['荷甲', 'Eredivisie'],
+  ['欧冠', 'Champions League'], ['欧联', 'Europa League'], ['欧会', 'Conference League'],
+  ['世界杯', 'World Cup'], ['足总杯', 'FA Cup'], ['中超', 'Chinese Super League'],
+  ['日职联', 'J-League'], ['韩职联', 'K-League'],
+];
+
+const normaliseLeague = (raw) => {
+  if (!raw) return null;
+  const lower = raw.toLowerCase().trim();
+  for (const [key, english] of LEAGUE_TRANSLATIONS) {
+    if (lower.includes(key.toLowerCase())) return english;
+  }
+  return raw;
+};
+
 chromium.use(StealthPlugin());
 
 const USER_AGENTS = [
@@ -195,31 +230,55 @@ const stringToSlug = (str) => {
 
 const ICT_OFFSET_MS = 7 * 60 * 60 * 1000;
 
-const buildMatchUrl = (match, baseUrl) => {
-  const home = stringToSlug(match.home_team?.short_name || match.home_team?.name || '');
-  const away = stringToSlug(match.away_team?.short_name || match.away_team?.name || '');
-  if (!home || !away) return null;
+// Socolive slugs are inconsistent — some teams use full name, some use short name.
+// Return all 4 combinations so extractListStream can try each one.
+const buildMatchUrls = (match, baseUrl) => {
+  const hShort = stringToSlug(match.home_team?.short_name || '');
+  const hFull  = stringToSlug(match.home_team?.name       || '');
+  const aShort = stringToSlug(match.away_team?.short_name || '');
+  const aFull  = stringToSlug(match.away_team?.name       || '');
+  if ((!hShort && !hFull) || (!aShort && !aFull)) return [];
 
   const ictDate = new Date(match.match_time * 1000 + ICT_OFFSET_MS);
-  const HH  = String(ictDate.getUTCHours()).padStart(2, '0');
-  const MM  = String(ictDate.getUTCMinutes()).padStart(2, '0');
-  const DD  = String(ictDate.getUTCDate()).padStart(2, '0');
-  const mo  = String(ictDate.getUTCMonth() + 1).padStart(2, '0');
-  const YY  = ictDate.getUTCFullYear();
+  const HH = String(ictDate.getUTCHours()).padStart(2, '0');
+  const MM = String(ictDate.getUTCMinutes()).padStart(2, '0');
+  const DD = String(ictDate.getUTCDate()).padStart(2, '0');
+  const mo = String(ictDate.getUTCMonth() + 1).padStart(2, '0');
+  const YY = ictDate.getUTCFullYear();
+  const suffix = `-luc-${HH}${MM}-ngay-${DD}-${mo}-${YY}`;
+  const base   = baseUrl.replace(/\/$/, '');
 
-  return `${baseUrl}/truc-tiep/${home}-vs-${away}-luc-${HH}${MM}-ngay-${DD}-${mo}-${YY}/`;
+  const combos = [...new Set([
+    `${hFull}-vs-${aShort}`,   // most common: Newcastle United vs West Ham
+    `${hShort}-vs-${aShort}`,  // both short
+    `${hFull}-vs-${aFull}`,    // both full
+    `${hShort}-vs-${aFull}`,   // short vs full
+  ])].filter((s) => s !== '-vs-' && !s.startsWith('-') && !s.endsWith('-'));
+
+  return combos.map((s) => `${base}/truc-tiep/${s}${suffix}/`);
 };
+
+// Keep single-URL fallback for compatibility with other callers
+const buildMatchUrl = (match, baseUrl) => buildMatchUrls(match, baseUrl)[0] || null;
 
 // ─── Live match list (direct API, no browser needed) ─────────────────────────
 
+// status_id reference: 1=not started, 2=1st half, 3=half-time, 4=2nd half,
+// 5=extra time, 6=penalties, 7=finished(full), 8=finished(other), 9=postponed
+// We fetch 2-7 as "live" — status 7 included so nearly-finished matches still show streams
 const LIVE_STATUS_IDS = new Set([2, 3, 4, 5, 6, 7]);
 
-// Faster httpsGet for bulk match detail fetching (shorter timeout, no redirect)
+// Faster httpsGet for bulk match detail fetching — longer timeout, no redirect follow
 const httpsGetFast = (url, headers = {}) => new Promise((resolve) => {
   const { get } = require('https');
   const req = get(url, {
-    timeout: 5000,
-    headers: { 'User-Agent': randomUA(), ...headers },
+    timeout: 10000,
+    headers: {
+      'User-Agent':      randomUA(),
+      'Accept':          'application/json, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      ...headers,
+    },
   }, (res) => {
     let body = '';
     res.setEncoding('utf8');
@@ -230,29 +289,74 @@ const httpsGetFast = (url, headers = {}) => new Promise((resolve) => {
   req.on('timeout', () => { req.destroy(); resolve(null); });
 });
 
-// detail_live returns only {id, score, status_id} — fetch full details in parallel
-// Cap at MAX_DETAIL_FETCH to avoid overloading the API per cycle
-const MAX_DETAIL_FETCH = 80;
+// detail_live returns only {id, score, status_id} — fetch full details in parallel.
+// In-memory cache so repeated cycles don't re-fetch unchanged team/competition data.
+const MAX_DETAIL_FETCH = 150;
+
+// Cache: id → { home_team, away_team, competition, match_time, cachedAt }
+// Entries kept for 12 hours — team names/logos never change mid-match
+// Cleared only on server restart (one cold cycle to refill)
+const matchDetailCache = new Map();
+const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+
+const DETAIL_BATCH = 5;    // small batches to avoid rate-limiting
+const BATCH_DELAY  = 300;  // ms between batches
 
 const fetchMatchDetails = async (api, baseUrl, ids) => {
-  const capped = ids.slice(0, MAX_DETAIL_FETCH);
-  const limit   = pLimit(15);
+  const all     = ids.slice(0, MAX_DETAIL_FETCH);
   const referer = { Referer: baseUrl + '/', Origin: baseUrl };
-  const results = await Promise.all(
-    capped.map(({ id, score, status_id }) =>
-      limit(async () => {
+
+  // Split into cache hits vs misses (cache valid for 12h)
+  const now    = Date.now();
+  const hits   = [];
+  const misses = [];
+  for (const item of all) {
+    const c = matchDetailCache.get(item.id);
+    if (c && (now - c.cachedAt) < CACHE_TTL_MS) {
+      hits.push({ ...c, id: item.id, score: item.score, status_id: item.status_id });
+    } else {
+      misses.push(item);
+    }
+  }
+
+  if (misses.length) {
+    console.log(`[socolive] detail cache: ${hits.length} hits, ${misses.length} misses — fetching…`);
+  }
+
+  // Fetch misses in small batches with delay to avoid rate-limiting
+  const fetched = [];
+  for (let i = 0; i < misses.length; i += DETAIL_BATCH) {
+    const batch   = misses.slice(i, i + DETAIL_BATCH);
+    const results = await Promise.all(
+      batch.map(async ({ id, score, status_id }) => {
         const res = await httpsGetFast(`${api}/match/${id}`, referer);
         if (!res?.body) return null;
         try {
           const d = JSON.parse(res.body);
           const m = d.data;
           if (!m?.home_team?.name || !m?.away_team?.name) return null;
+          // Save to cache — team names/logos never change mid-match
+          matchDetailCache.set(id, {
+            home_team:   m.home_team,
+            away_team:   m.away_team,
+            competition: m.competition,
+            match_time:  m.match_time,
+            cachedAt:    Date.now(),
+          });
           return { ...m, score, status_id };
         } catch (_) { return null; }
       })
-    )
-  );
-  return results.filter(Boolean);
+    );
+    fetched.push(...results.filter(Boolean));
+    // Pause between batches so the API doesn't throttle us
+    if (i + DETAIL_BATCH < misses.length) {
+      await new Promise((r) => setTimeout(r, BATCH_DELAY));
+    }
+  }
+
+  const total = hits.length + fetched.length;
+  console.log(`[socolive] detail ready: ${total} matches (${hits.length} cached, ${fetched.length} fetched)`);
+  return [...hits, ...fetched];
 };
 
 const fetchMatchList = async (baseUrl) => {
@@ -296,8 +400,8 @@ const fetchMatchList = async (baseUrl) => {
   // Step 3: normalise — use siteBase (redirect target) not original mirror URL
   const matches = detailed
     .map((m) => {
-      const matchPath = buildMatchUrl(m, siteBase);
-      if (!matchPath) return null;
+      const matchPaths = buildMatchUrls(m, siteBase);
+      if (!matchPaths.length) return null;
       return {
         sourceId:     m.id,
         title:        `${m.home_team.short_name || m.home_team.name} vs ${m.away_team.short_name || m.away_team.name}`,
@@ -305,13 +409,14 @@ const fetchMatchList = async (baseUrl) => {
         away_team:    m.away_team.name || '',
         home_logo:    m.home_team.logo || null,
         away_logo:    m.away_team.logo || null,
-        league:       m.competition?.name || null,
+        league:       normaliseLeague(m.competition?.name) || null,
         status:       'live',
         score_home:   Array.isArray(m.score) ? (m.score[2]?.[1] ?? null) : null,
         score_away:   Array.isArray(m.score) ? (m.score[3]?.[1] ?? null) : null,
         elapsed:      null,
         scheduled_at: m.match_time ? new Date(m.match_time * 1000).toISOString() : null,
-        matchPath,
+        matchPath:    matchPaths[0],   // primary (for DB/display)
+        matchPaths,                    // all candidates (for stream extraction)
         isLive:       true,
       };
     })
@@ -338,7 +443,13 @@ const newContext = (browser) =>
 
 // ─── Stream URL fetching ──────────────────────────────────────────────────────
 
-const classifyQuality = (url) => /hd|720|1080|high/i.test(url) ? 'HD' : 'SD';
+// Iframe URLs (livepingscorex.com) have no quality indicator — return null so UI shows "Server N"
+const classifyQuality = (url) => {
+  if (!url) return null;
+  if (/hd|720|1080|high/i.test(url)) return 'HD';
+  if (/\.m3u8|\.flv/i.test(url)) return 'SD';
+  return null;
+};
 
 const parseTokenExpiry = (url) => {
   const m = url.match(/auth_key=(\d{10})/);
@@ -347,19 +458,25 @@ const parseTokenExpiry = (url) => {
 };
 
 // Primary: extract list_stream from the match page HTML — fast, no browser needed.
-// Socolive embeds all stream server URLs directly in the page as:
-//   var list_stream = [["https://soco.livepingscorex.com/ajax/chanel/..."], ...]
-const extractListStream = async (matchUrl) => {
-  const res = await httpsGet(matchUrl, { Referer: matchUrl });
-  if (!res?.body) return [];
-  const m = res.body.match(/var\s+list_stream\s*=\s*(\[[\s\S]*?\]);/);
-  if (!m) return [];
-  try {
-    const raw = JSON.parse(m[1].replace(/\\\//g, '/'));
-    // raw = [[url1, url2], [url3], ...] — flatten, deduplicate
-    const urls = [...new Set(raw.flat().filter((u) => u?.startsWith('http')))];
-    return urls.map((url) => ({ url, quality: classifyQuality(url) }));
-  } catch (_) { return []; }
+// Tries multiple URL slug combinations since socolive inconsistently uses
+// full team name vs short name (e.g. "newcastle-united" vs "newcastle").
+const extractListStream = async (matchUrls) => {
+  const candidates = Array.isArray(matchUrls) ? matchUrls : [matchUrls];
+  for (const matchUrl of candidates) {
+    if (!matchUrl) continue;
+    const res = await httpsGet(matchUrl, { Referer: matchUrl });
+    if (!res?.body) continue;
+    const m = res.body.match(/var\s+list_stream\s*=\s*(\[[\s\S]*?\]);/);
+    if (!m) continue;
+    try {
+      const raw = JSON.parse(m[1].replace(/\\\//g, '/'));
+      const urls = [...new Set(raw.flat().filter((u) => u?.startsWith('http')))];
+      if (urls.length > 0) {
+        return urls.map((url) => ({ url, quality: classifyQuality(url) }));
+      }
+    } catch (_) {}
+  }
+  return [];
 };
 
 // Fallback: Playwright-based .m3u8/.flv interception for non-socolive sources
@@ -419,14 +536,21 @@ const fetchStreamUrlsViaPlaywright = async (matchUrl, browser) => {
   }
 };
 
-// Main entry: try HTTP first (fast), fall back to Playwright
-const fetchStreamUrls = async (matchUrl, browser) => {
-  const streams = await extractListStream(matchUrl);
+// Main entry: try HTTP first across all URL candidates.
+// When matchPaths are provided (socolive matches), HTTP extraction is definitive —
+// if none of the slug candidates have list_stream, the match has no streams yet.
+// Playwright fallback is only for external JS-rendered sources without matchPaths.
+const fetchStreamUrls = async (matchUrl, browser, matchPaths) => {
+  const candidates = matchPaths?.length ? matchPaths : [matchUrl];
+  const streams = await extractListStream(candidates);
   if (streams.length > 0) {
-    console.log(`[socolive] HTTP stream extract: ${streams.length} server(s) for ${matchUrl.split('/').slice(-2, -1)[0]}`);
+    const slug = candidates[0]?.split('/').slice(-2, -1)[0] || '';
+    console.log(`[socolive] HTTP stream extract: ${streams.length} server(s) — ${slug}`);
     return streams;
   }
-  // Fallback for non-socolive or JS-only stream pages
+  // Skip Playwright if we already tried all socolive slug combinations
+  if (matchPaths?.length) return [];
+  // Fallback for external JS-rendered sources
   return fetchStreamUrlsViaPlaywright(matchUrl, browser);
 };
 
@@ -459,7 +583,7 @@ const saveMatchToDB = async (match, tabId) => {
          status       = CASE WHEN status = 'finished' THEN 'finished' ELSE $1 END,
          score_home   = $2, score_away   = $3, elapsed_minutes = $4,
          home_logo    = $5, away_logo    = $6,
-         league       = COALESCE($7, league)
+         league       = COALESCE($7::text, league)
        WHERE id = $8`,
       [match.status, match.score_home, match.score_away, match.elapsed ?? null,
        home_logo, away_logo, match.league || null, matchId]
@@ -480,6 +604,8 @@ const saveMatchToDB = async (match, tabId) => {
   if (!match.streams?.length) return;
 
   for (const stream of match.streams) {
+    // null quality (iframe servers) → stored as 'SD' so streams route groups it correctly
+    const quality   = stream.quality || 'SD';
     const expiresAt = parseTokenExpiry(stream.url) || new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
     const dup = await db.query(
       "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1)=split_part($2,'?',1) LIMIT 1",
@@ -492,7 +618,7 @@ const saveMatchToDB = async (match, tabId) => {
       await db.query(
         `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
          VALUES ($1,$2,$3,'socolive',$4,true,$5,now())`,
-        [matchId, stream.url, stream.quality, stream.quality === 'HD' ? 2 : 1, expiresAt]
+        [matchId, stream.url, quality, quality === 'HD' ? 2 : 1, expiresAt]
       );
     }
   }
@@ -570,7 +696,10 @@ const run = async () => {
 
   console.log(`[socolive] ${matches.length} live matches from ${workingBase}`);
 
-  const browser = await newBrowser();
+  // All matches from fetchMatchList have matchPaths — HTTP-only extraction, no browser needed.
+  // Browser is only launched as a last resort for external sources without matchPaths.
+  const needsPlaywright = matches.some((m) => !m.matchPaths?.length);
+  const browser = needsPlaywright ? await newBrowser() : null;
   const limit   = pLimit(CONCURRENCY);
 
   try {
@@ -586,7 +715,7 @@ const run = async () => {
             if (matchId && await hasFreshStreams(matchId)) {
               match.streams = [];
             } else {
-              match.streams = await fetchStreamUrls(match.matchPath, browser);
+              match.streams = await fetchStreamUrls(match.matchPath, browser, match.matchPaths);
             }
           } catch (err) {
             console.error(`[socolive] Stream fetch failed "${match.title}":`, err.message);
@@ -596,7 +725,7 @@ const run = async () => {
       )
     );
   } finally {
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 
   const activeIds = [];
