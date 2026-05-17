@@ -255,7 +255,11 @@ const buildMatchUrls = (match, baseUrl) => {
     `${hShort}-vs-${aFull}`,   // short vs full
   ])].filter((s) => s !== '-vs-' && !s.startsWith('-') && !s.endsWith('-'));
 
-  return combos.map((s) => `${base}/truc-tiep/${s}${suffix}/`);
+  // With time suffix (primary — socolive canonical URL format)
+  const withTime    = combos.map((s) => `${base}/truc-tiep/${s}${suffix}/`);
+  // Without time suffix (fallback — some mirrors omit it or use a different time)
+  const withoutTime = combos.slice(0, 2).map((s) => `${base}/truc-tiep/${s}/`);
+  return [...withTime, ...withoutTime];
 };
 
 // Keep single-URL fallback for compatibility with other callers
@@ -559,7 +563,7 @@ const fetchStreamUrls = async (matchUrl, browser, matchPaths) => {
 const hasFreshStreams = async (matchId) => {
   const r = await db.query(
     `SELECT 1 FROM stream_urls WHERE match_id = $1 AND is_healthy = true
-     AND (expires_at IS NULL OR expires_at > NOW() + INTERVAL '30 minutes') LIMIT 1`,
+     AND (expires_at IS NULL OR expires_at > NOW() + INTERVAL '15 minutes') LIMIT 1`,
     [matchId]
   );
   return r.rows.length > 0;

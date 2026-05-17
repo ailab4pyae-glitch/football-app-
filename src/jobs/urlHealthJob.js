@@ -19,25 +19,29 @@ const getHealthConfig = async () => {
   }
 };
 
-const checkUrl = async (url) => {
+const REFERER_BY_SOURCE = {
+  chinalive: 'https://yyzbw8.live/',
+  socolive:  'https://socolivexx.tv/',
+  xoilac:    'https://xl365.livepingscorex.com/',
+};
+
+const checkUrl = async (url, sourceName) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  const start = Date.now();
+  const start   = Date.now();
+  const referer = REFERER_BY_SOURCE[sourceName] || null;
+  const baseHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    ...(referer ? { Referer: referer } : {}),
+  };
   try {
     // Try HEAD first; fall back to GET with Range (some CDNs reject HEAD)
-    let res = await fetch(url, {
-      method: 'HEAD',
-      signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' }
-    });
+    let res = await fetch(url, { method: 'HEAD', signal: controller.signal, headers: baseHeaders });
     if (res.status === 405 || res.status === 403) {
       res = await fetch(url, {
         method: 'GET',
         signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-          'Range': 'bytes=0-1',
-        }
+        headers: { ...baseHeaders, Range: 'bytes=0-1' },
       });
     }
     const ok = res.ok || res.status === 206;
@@ -89,7 +93,7 @@ const runHealthCheck = async (failThreshold) => {
       return;
     }
 
-    const { ok, latency } = await checkUrl(stream.url);
+    const { ok, latency } = await checkUrl(stream.url, stream.source_name);
     const newFailCount = ok ? 0 : stream.fail_count + 1;
 
     await db.query(

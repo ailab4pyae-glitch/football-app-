@@ -61,7 +61,7 @@ module.exports = async function (fastify, opts) {
     }
 
     try {
-      await redis.set(cacheKey, JSON.stringify(grouped), 'EX', 30);
+      await redis.set(cacheKey, JSON.stringify(grouped), 'EX', 15);
     } catch (err) {
       fastify.log.warn('Failed to cache streams', err);
     }
