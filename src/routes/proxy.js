@@ -195,7 +195,7 @@ module.exports = async function (fastify) {
 
       const base    = new URL(cdnUrl);
       const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
-      const apiBase  = `${request.protocol}://${request.headers.host}`;
+      const apiBase  = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
 
       // Rewrite every URL in the playlist:
       // - Relative → absolute
@@ -251,7 +251,7 @@ module.exports = async function (fastify) {
     const { url: cdnUrl, source_name } = record;
     const isChina = source_name === 'chinalive';
     const referer  = REFERER_BY_SOURCE[source_name] || null;
-    const apiBase  = `${request.protocol}://${request.headers.host}`;
+    const apiBase  = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
 
     const markUnhealthy = () => {
       invalidateStream(id);
@@ -366,7 +366,7 @@ module.exports = async function (fastify) {
 
       const base     = new URL(streamUrl);
       const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
-      const apiBase  = `${request.protocol}://${request.headers.host}`;
+      const apiBase  = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
       let m3u8 = m3u8Body.replace(/^([^#\r\n].+)$/gm, (line) => {
         const abs = line.startsWith('http') ? line
                   : line.startsWith('/')    ? `${base.origin}${line}`

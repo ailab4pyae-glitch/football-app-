@@ -2,7 +2,7 @@ require('dotenv').config();
 require('./config/scraperLog'); // intercept console before any scraper runs
 
 const path    = require('path');
-const fastify = require('fastify')({ logger: true });
+const fastify = require('fastify')({ logger: true, trustProxy: true });
 
 fastify.register(require('@fastify/env'), {
   dotenv: false,

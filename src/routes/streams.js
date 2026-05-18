@@ -32,7 +32,7 @@ module.exports = async function (fastify, opts) {
       [matchId]
     );
 
-    const apiBase = `${request.protocol}://${request.headers.host}`;
+    const apiBase = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
     const grouped = { SD: [], HD: [] };
     for (const row of rows) {
       const q = row.quality === 'HD' ? 'HD' : 'SD';
