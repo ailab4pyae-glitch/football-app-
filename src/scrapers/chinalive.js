@@ -248,7 +248,10 @@ const saveMatch = async (sched, streams, tabId, sourceId) => {
   const toUpdate = [];
 
   for (const s of streams) {
-    const tokenExpiry = parseTokenExpiry(s.url);
+    // Use actual token expiry when available; fall back to 30-min TTL so
+    // expireOldUrls() can clean up CDN streams that don't carry an auth_key.
+    const tokenExpiry = parseTokenExpiry(s.url)
+      || new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const prio = s.priority ?? (s.quality === 'HD' ? 2 : 1);
     const baseUrl = s.url.split('?')[0];
     const existId = existingMap.get(baseUrl);
@@ -289,15 +292,30 @@ const saveMatch = async (sched, streams, tabId, sourceId) => {
 const markFinished = async () => {
   const tabId = await getTabId();
   if (!tabId) return;
-  // Only finish a match when the API explicitly signals it (matchStatus >= 10, handled
-  // via the upsert in processMatch) OR after the hard 4-hour safety net.
-  // We do NOT use "NOT IN activeIds" — anchors can temporarily disappear from the API
-  // response during a live match, and we must not flip the status on each scrape cycle.
+
+  // Hard safety-net: mark finished after 6 hours regardless.
   await db.query(
     `UPDATE matches SET status='finished'
      WHERE tab_id=$1 AND source_name='chinalive'
        AND status='live'
        AND scheduled_at < NOW() - INTERVAL '6 hours'`,
+    [tabId]
+  );
+
+  // Soft clean-up: if a live match has had no healthy, non-expired streams for
+  // more than 2 hours (broadcaster went offline), hide it — no point showing
+  // "No servers available" indefinitely. 2 hours gives time for temporary outages.
+  await db.query(
+    `UPDATE matches SET status='finished'
+     WHERE tab_id=$1 AND source_name='chinalive'
+       AND status='live'
+       AND scheduled_at < NOW() - INTERVAL '2 hours'
+       AND NOT EXISTS (
+         SELECT 1 FROM stream_urls su
+         WHERE su.match_id = matches.id
+           AND su.is_healthy = true
+           AND (su.expires_at IS NULL OR su.expires_at > NOW())
+       )`,
     [tabId]
   );
 };

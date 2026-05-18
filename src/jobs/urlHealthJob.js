@@ -124,9 +124,14 @@ const runHealthCheck = async (failThreshold) => {
     // 2. CDN auth-key URLs (pullsgp, procdnlive, etc.) — CDN blocks server IPs;
     //    the expires_at field (set by the scraper from the auth_key timestamp) is
     //    the authoritative health signal — expireOldUrls() handles these.
+    // CDN domains that block server-side requests — skip HTTP check entirely.
+    // Trust expires_at for auth_key URLs; scraper refreshes every 2 min.
     const isBrowserOnly = stream.url.includes('livepingscorex.com')
       || /[?&]auth_key=\d/.test(stream.url)
-      || /wsSecret=/.test(stream.url);
+      || /wsSecret=/.test(stream.url)
+      || stream.url.includes('pullsgp.yyzb456.top')
+      || stream.url.includes('procdnlive.com')
+      || stream.url.includes('yyzb456.top');
 
     if (isBrowserOnly) {
       await db.query(
