@@ -115,7 +115,7 @@ const saveMatchToDB = async (match, tabId) => {
     );
     if (dup.rows.length) {
       await db.query(
-        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true WHERE id=$3',
+        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true, fail_count=0 WHERE id=$3',
         [stream.url, expiresAt, dup.rows[0].id]
       );
     } else {

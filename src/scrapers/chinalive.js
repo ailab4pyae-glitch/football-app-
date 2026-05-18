@@ -172,11 +172,11 @@ const fetchStreams = async (roomNum, baseApi = CHINA_DEFAULTS.api_base, referer 
 const parseTokenExpiry = (url) => {
   const m = url.match(/auth_key=(\d{10})/);
   if (!m) return null;
-  const expiryMs = parseInt(m[1], 10) * 1000;
-  // If token is already expired, return null — let urlHealthJob verify real health
-  // rather than immediately hiding the stream from the player
-  if (expiryMs <= Date.now()) return null;
-  return new Date(expiryMs).toISOString();
+  // Always store the actual expiry so expireOldUrls() can correctly hide expired streams.
+  // Health checks are skipped for auth_key URLs (urlHealthJob.js), so expireOldUrls()
+  // is the only mechanism that marks these streams unhealthy. The scraper will refresh
+  // within 2 minutes with a new token.
+  return new Date(parseInt(m[1], 10) * 1000).toISOString();
 };
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
@@ -279,7 +279,7 @@ const saveMatch = async (sched, streams, tabId, sourceId) => {
       `UPDATE stream_urls
          SET url=$1, priority=$2,
              expires_at=$3::timestamptz,
-             is_healthy=true
+             is_healthy=true, fail_count=0
        WHERE id=$4`,
       [s.url, s.prio, s.tokenExpiry, s.id]
     )

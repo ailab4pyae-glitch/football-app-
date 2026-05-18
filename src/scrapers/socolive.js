@@ -119,10 +119,20 @@ const getTabId = async () => {
 // ─── API discovery ────────────────────────────────────────────────────────────
 
 // Extract the backend API URL from the site's localized sport_data variable.
-// This is injected by PHP into every page — if the site changes its API host, we pick it up automatically.
+// Multiple patterns handle different socolive mirror JS structures.
 const extractApiUrl = (html) => {
-  const m = html.match(/["']api["']\s*:\s*["'](https?:[^"']+football)["']/);
-  return m ? m[1].replace(/\\/g, '') : null;
+  const patterns = [
+    /["']api["']\s*:\s*["'](https?:[^"']+football)["']/,
+    /["']api_url["']\s*:\s*["'](https?:[^"']+)["']/,
+    /var\s+api_url\s*=\s*["'](https?:[^"']+)["']/,
+    /apiUrl\s*[:=]\s*["'](https?:[^"']+)["']/,
+    /["']base_url["']\s*:\s*["'](https?:[^"']+football[^"']*)["']/,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m) return m[1].replace(/\\/g, '');
+  }
+  return null;
 };
 
 // Cache the API URL per base domain so we don't re-fetch the HTML every cycle
@@ -169,9 +179,29 @@ const searchWeb = async (query) => {
   return [...domains];
 };
 
+// Cooldown: only attempt auto-discovery once per 30 min to avoid hammering search engines
+let lastDiscoveryAt = 0;
+const DISCOVERY_COOLDOWN_MS = 30 * 60 * 1000;
+
 const discoverMirror = async () => {
+  const now = Date.now();
+  if (now - lastDiscoveryAt < DISCOVERY_COOLDOWN_MS) {
+    console.log('[socolive] Auto-discovery skipped — cooldown active');
+    return null;
+  }
+  lastDiscoveryAt = now;
+
   console.log('[socolive] Running auto-discovery…');
-  const candidates = await searchWeb('socolive truc tiep bong da xem truc tuyen site:*.tv OR site:*.io OR site:*.cv');
+  const queries = [
+    'socolive truc tiep bong da xem truc tuyen site:*.tv OR site:*.io OR site:*.cv',
+    'socolive football live stream API',
+  ];
+  const allCandidates = new Set();
+  for (const q of queries) {
+    for (const c of await searchWeb(q)) allCandidates.add(c);
+    if (allCandidates.size >= 10) break;
+  }
+  const candidates = [...allCandidates];
   console.log(`[socolive] Candidates: ${candidates.slice(0, 5).join(', ')}`);
 
   for (const candidate of candidates.slice(0, 10)) {
@@ -616,8 +646,10 @@ const saveMatchToDB = async (match, tabId) => {
       [matchId, stream.url]
     );
     if (dup.rows.length) {
-      await db.query('UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true WHERE id=$3',
-        [stream.url, expiresAt, dup.rows[0].id]);
+      await db.query(
+        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true, fail_count=0 WHERE id=$3',
+        [stream.url, expiresAt, dup.rows[0].id]
+      );
     } else {
       await db.query(
         `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)

@@ -30,7 +30,7 @@ const query = async (text, params) => {
       // Suppress unhandled 'error' events on the checked-out client —
       // these fire when Neon drops the connection mid-query and would
       // otherwise crash the process as an uncaught exception.
-      client.setMaxListeners(20);
+      client.removeAllListeners('error');
       client.on('error', () => {});
       const result = await client.query(text, params);
       client.release();

@@ -119,7 +119,16 @@ const runHealthCheck = async (failThreshold) => {
   await Promise.all(streams.map(async (stream) => {
     // Xoilac channel proxy URLs return HTML (not stream data) — skip direct health check.
     // The FLV proxy fetches a fresh CDN URL at play time, so these are always "healthy".
-    if (stream.url.includes('livepingscorex.com')) {
+    // Skip HTTP verification for URLs that only work in a browser context:
+    // 1. Channel proxy URLs (livepingscorex.com) — return HTML, not stream data
+    // 2. CDN auth-key URLs (pullsgp, procdnlive, etc.) — CDN blocks server IPs;
+    //    the expires_at field (set by the scraper from the auth_key timestamp) is
+    //    the authoritative health signal — expireOldUrls() handles these.
+    const isBrowserOnly = stream.url.includes('livepingscorex.com')
+      || /[?&]auth_key=\d/.test(stream.url)
+      || /wsSecret=/.test(stream.url);
+
+    if (isBrowserOnly) {
       await db.query(
         'UPDATE stream_urls SET last_checked = NOW() WHERE id = $1',
         [stream.id]

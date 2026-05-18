@@ -326,7 +326,8 @@ const saveMatch = async (data, tabId) => {
     } else {
       await db.query(
         `UPDATE stream_urls
-           SET url=$1, priority=$2, quality=$3, expires_at=NOW()+$4::interval, is_healthy=true
+           SET url=$1, priority=$2, quality=$3, expires_at=NOW()+$4::interval,
+               is_healthy=true, fail_count=0
          WHERE id=$5`,
         [url, priority, quality, ttl, ex.rows[0].id]
       );
