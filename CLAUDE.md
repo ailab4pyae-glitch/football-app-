@@ -12,7 +12,7 @@ Sports live streaming aggregator web app targeting global users with Myanmar foc
 
 ## Tabs / Categories
 1. **Main Live** - Integration with streamed.su API
-2. **SOCO Live** - Scraper for socolive.tv
+2. **SOCO Live** - Scraper for 
 3. **China Live** - Scraper for yyzbw8.live
 4. **Loungsan** - Aggregation of alternative sources
 5. **English** - Filtered for English commentary only

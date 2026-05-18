@@ -121,7 +121,9 @@ const fetchRooms = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEF
     if (Array.isArray(arr)) rooms.push(...arr);
   }
   const live = rooms.filter((r) => r.liveStatus === 1);
-  return new Map(live.map((r) => [String(r.roomNum), r]));
+  // allRooms includes non-live rooms so we can pre-fetch streams for upcoming matches
+  const allRooms = new Map(rooms.map((r) => [String(r.roomNum), r]));
+  return { liveMap: new Map(live.map((r) => [String(r.roomNum), r])), allRooms };
 };
 
 // ─── Fetch stream URLs for one room ──────────────────────────────────────────
@@ -165,6 +167,18 @@ const fetchStreams = async (roomNum, baseApi = CHINA_DEFAULTS.api_base, referer 
   }
 };
 
+// ─── Token helpers ────────────────────────────────────────────────────────────
+
+const parseTokenExpiry = (url) => {
+  const m = url.match(/auth_key=(\d{10})/);
+  if (!m) return null;
+  const expiryMs = parseInt(m[1], 10) * 1000;
+  // If token is already expired, return null — let urlHealthJob verify real health
+  // rather than immediately hiding the stream from the player
+  if (expiryMs <= Date.now()) return null;
+  return new Date(expiryMs).toISOString();
+};
+
 // ─── DB helpers ───────────────────────────────────────────────────────────────
 
 let cachedTabId = null;
@@ -187,92 +201,103 @@ const saveMatch = async (sched, streams, tabId, sourceId) => {
   const score_away  = sched.score_away ?? null;
   const db_status   = sched.db_status || 'live';
 
-  const existing = await db.query(
-    'SELECT id FROM matches WHERE source_match_id = $1 AND source_name = $2 LIMIT 1',
-    [sourceId, 'chinalive']
+  // Upsert match in one round-trip
+  const upsertResult = await db.query(
+    `INSERT INTO matches
+       (tab_id, title, home_team, away_team, home_logo, away_logo, league,
+        status, scheduled_at, source_match_id, source_name,
+        score_home, score_away, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'chinalive',$11,$12,now())
+     ON CONFLICT (source_match_id, source_name) DO UPDATE
+       SET status = CASE
+             -- Never downgrade: live→scheduled or finished→anything
+             WHEN matches.status = 'live'     AND EXCLUDED.status = 'scheduled' THEN 'live'
+             WHEN matches.status = 'finished'                                   THEN 'finished'
+             ELSE EXCLUDED.status
+           END,
+           title      = EXCLUDED.title,
+           home_team  = EXCLUDED.home_team,
+           away_team  = EXCLUDED.away_team,
+           home_logo  = EXCLUDED.home_logo,
+           away_logo  = EXCLUDED.away_logo,
+           league     = EXCLUDED.league,
+           score_home = EXCLUDED.score_home,
+           score_away = EXCLUDED.score_away,
+           scheduled_at = CASE
+             WHEN EXCLUDED.scheduled_at IS NOT NULL
+              AND ABS(EXTRACT(EPOCH FROM (matches.scheduled_at - matches.created_at))) < 120
+             THEN EXCLUDED.scheduled_at
+             ELSE matches.scheduled_at
+           END
+     RETURNING id`,
+    [tabId, title, home_team, away_team, home_logo, away_logo, league,
+     db_status, scheduledAt, sourceId, score_home, score_away]
   );
+  const matchId = upsertResult.rows[0].id;
 
-  let matchId;
-  if (existing.rows.length > 0) {
-    matchId = existing.rows[0].id;
-    await db.query(
-      `UPDATE matches
-         SET status = $1, title = $2,
-             home_team = $3, away_team = $4,
-             home_logo = $5, away_logo = $6,
-             league = $7,
-             score_home = $8, score_away = $9,
-             scheduled_at = CASE
-               WHEN $11::timestamptz IS NOT NULL
-                AND ABS(EXTRACT(EPOCH FROM (scheduled_at - created_at))) < 120
-               THEN $11::timestamptz
-               ELSE scheduled_at
-             END
-       WHERE id = $10`,
-      [db_status, title, home_team, away_team, home_logo, away_logo, league,
-       score_home, score_away, matchId, scheduledAt]
-    );
-  } else {
-    const ins = await db.query(
-      `INSERT INTO matches
-         (tab_id, title, home_team, away_team, home_logo, away_logo, league,
-          status, scheduled_at, source_match_id, source_name,
-          score_home, score_away, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'chinalive',$11,$12,now())
-       RETURNING id`,
-      [tabId, title, home_team, away_team, home_logo, away_logo, league,
-       db_status, scheduledAt, sourceId, score_home, score_away]
-    );
-    matchId = ins.rows[0].id;
-  }
+  if (streams.length === 0) return;
+
+  // Batch-fetch all existing stream rows for this match in one query
+  const existing = await db.query(
+    "SELECT id, split_part(url,'?',1) AS base_url FROM stream_urls WHERE match_id = $1",
+    [matchId]
+  );
+  const existingMap = new Map(existing.rows.map((r) => [r.base_url, r.id]));
+
+  const toInsert = [];
+  const toUpdate = [];
 
   for (const s of streams) {
-    const ex = await db.query(
-      "SELECT id, is_healthy FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1) = split_part($2,'?',1) LIMIT 1",
-      [matchId, s.url]
-    );
-    if (ex.rows.length === 0) {
-      await db.query(
-        `INSERT INTO stream_urls
-           (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
-         VALUES ($1,$2,$3,'chinalive',$4,true,NOW()+interval '50 minutes',now())`,
-        [matchId, s.url, s.quality, s.priority ?? (s.quality === 'HD' ? 2 : 1)]
-      );
+    const tokenExpiry = parseTokenExpiry(s.url);
+    const prio = s.priority ?? (s.quality === 'HD' ? 2 : 1);
+    const baseUrl = s.url.split('?')[0];
+    const existId = existingMap.get(baseUrl);
+
+    if (existId) {
+      toUpdate.push({ id: existId, url: s.url, prio, tokenExpiry });
     } else {
-      // Always update CDN URL (refreshes auth_key) and priority — players use stable proxy URLs
-      await db.query(
-        `UPDATE stream_urls
-         SET url = $1,
-             priority = $2,
-             expires_at = NOW() + interval '50 minutes',
-             is_healthy = true
-         WHERE id = $3`,
-        [s.url, s.priority ?? (s.quality === 'HD' ? 2 : 1), ex.rows[0].id]
-      );
+      toInsert.push({ url: s.url, quality: s.quality, prio, tokenExpiry });
     }
   }
-};
 
-const markFinished = async (activeSourceIds) => {
-  if (activeSourceIds.length === 0) return;
-  const tabId = await getTabId();
-  if (!tabId) return;
-  if (activeSourceIds.length > 0) {
-    const placeholders = activeSourceIds.map((_, i) => `$${i + 2}`).join(',');
+  // Batch insert new streams
+  if (toInsert.length > 0) {
+    const vals = toInsert.map((s, i) => {
+      const b = i * 5;
+      return `($${b+1},$${b+2},$${b+3},'chinalive',$${b+4},true,$${b+5}::timestamptz,now())`;
+    }).join(',');
+    const params = toInsert.flatMap((s) => [matchId, s.url, s.quality, s.prio, s.tokenExpiry]);
     await db.query(
-      `UPDATE matches SET status='finished'
-       WHERE tab_id=$1 AND source_name='chinalive'
-         AND status='live'
-         AND source_match_id NOT IN (${placeholders})`,
-      [tabId, ...activeSourceIds]
+      `INSERT INTO stream_urls (match_id,url,quality,source_name,priority,is_healthy,expires_at,created_at) VALUES ${vals}`,
+      params
     );
   }
-  // Safety net: any live match scheduled 4+ hours ago is definitely finished
+
+  // Batch update existing streams one-by-one but async parallel (small arrays, fine to scatter)
+  await Promise.all(toUpdate.map((s) =>
+    db.query(
+      `UPDATE stream_urls
+         SET url=$1, priority=$2,
+             expires_at=$3::timestamptz,
+             is_healthy=true
+       WHERE id=$4`,
+      [s.url, s.prio, s.tokenExpiry, s.id]
+    )
+  ));
+};
+
+const markFinished = async () => {
+  const tabId = await getTabId();
+  if (!tabId) return;
+  // Only finish a match when the API explicitly signals it (matchStatus >= 10, handled
+  // via the upsert in processMatch) OR after the hard 4-hour safety net.
+  // We do NOT use "NOT IN activeIds" — anchors can temporarily disappear from the API
+  // response during a live match, and we must not flip the status on each scrape cycle.
   await db.query(
     `UPDATE matches SET status='finished'
      WHERE tab_id=$1 AND source_name='chinalive'
        AND status='live'
-       AND scheduled_at < NOW() - INTERVAL '4 hours'`,
+       AND scheduled_at < NOW() - INTERVAL '6 hours'`,
     [tabId]
   );
 };
@@ -292,6 +317,93 @@ const isFinishedStatus = (s) => s >= 10;
 
 // ─── Main run ─────────────────────────────────────────────────────────────────
 
+const PRE_FETCH_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+const MATCH_CONCURRENCY   = 4;              // process 4 matches in parallel
+
+const processMatch = async (match, { liveMap, allRooms, tabId, api_base, referer, now }) => {
+  const ms     = match.matchStatus ?? 0;
+  const cutoff = now - 4 * 60 * 60 * 1000;
+
+  if (match.matchTime && match.matchTime < cutoff) return null;
+  if (ms === -9999 || ms === -14) return null;
+
+  const liveRoomNums = [];
+  for (const anchor of match.anchors || []) {
+    const rn = String(anchor.anchor?.roomNum || anchor.roomNum || '');
+    if (rn && liveMap.has(rn)) liveRoomNums.push(rn);
+  }
+
+  const kickoffSoon = match.matchTime && (match.matchTime - now) <= PRE_FETCH_WINDOW_MS && match.matchTime > now;
+  const preFetchRoomNums = [];
+  if (kickoffSoon && liveRoomNums.length === 0) {
+    for (const anchor of match.anchors || []) {
+      const rn = String(anchor.anchor?.roomNum || anchor.roomNum || '');
+      if (rn && allRooms.has(rn)) preFetchRoomNums.push(rn);
+    }
+  }
+
+  if (ms === 0 && liveRoomNums.length === 0 && preFetchRoomNums.length === 0) return null;
+
+  const sourceId = String(match.scheduleId);
+  const dbStatus = liveRoomNums.length > 0 ? 'live'
+                 : isLiveStatus(ms)        ? 'live'
+                 : isFinishedStatus(ms)    ? 'finished'
+                 : preFetchRoomNums.length > 0 ? 'scheduled'
+                 : 'scheduled';
+
+  const sched = {
+    home_team:    match.hostName    || '',
+    away_team:    match.guestName   || '',
+    league:       match.subCateName || null,
+    home_logo:    absoluteLogo(match.hostIcon),
+    away_logo:    absoluteLogo(match.guestIcon),
+    scheduled_at: match.matchTime ? new Date(match.matchTime).toISOString() : null,
+    score_home:   match.hostScore  != null ? Number(match.hostScore)  : null,
+    score_away:   match.guestScore != null ? Number(match.guestScore) : null,
+    db_status:    dbStatus,
+  };
+
+  const allStreams = [];
+  const roomsToFetch = liveRoomNums.length > 0 ? liveRoomNums : preFetchRoomNums;
+
+  if (roomsToFetch.length > 0) {
+    const sortedRooms = roomsToFetch
+      .map((rn) => ({ rn, views: liveMap.get(rn)?.viewCount || allRooms.get(rn)?.viewCount || 0 }))
+      .sort((a, b) => b.views - a.views);
+
+    for (let rank = 0; rank < sortedRooms.length; rank++) {
+      await jitter(300, 800);
+      const streams = await fetchStreams(sortedRooms[rank].rn, api_base, referer).catch(() => []);
+      for (const s of streams) {
+        const isHLS = s.url.includes('.m3u8');
+        if (!isHLS && rank > 0) continue;
+        const priority = isHLS && s.quality === 'HD' ? 10 - rank
+                       : isHLS                       ?  6 - rank
+                       : s.quality === 'HD'          ?  3
+                       :                                2;
+        allStreams.push({ ...s, priority });
+      }
+    }
+  }
+
+  await saveMatch(sched, allStreams, tabId, sourceId);
+  const tag = preFetchRoomNums.length > 0 && liveRoomNums.length === 0 ? 'pre-fetch' : dbStatus;
+  console.log(`[chinalive] ${tag} "${sched.home_team} vs ${sched.away_team}" — ${allStreams.length} streams (status=${ms})`);
+};
+
+const runWithConcurrency = async (items, concurrency, fn) => {
+  const results = [];
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+};
+
 const run = async () => {
   console.log('[chinalive] Starting scrape…');
   const tabId = await getTabId();
@@ -299,85 +411,29 @@ const run = async () => {
 
   const { api_base, referer } = await getSourceConfig();
 
-  const [scheduleMatches, roomMap] = await Promise.all([
+  const [scheduleMatches, roomsResult] = await Promise.all([
     fetchScheduleMatches(api_base, referer),
     fetchRooms(api_base, referer).catch((err) => {
       console.error('[chinalive] Failed to fetch rooms:', err.message);
       return null;
     }),
   ]);
-  if (!roomMap) return;
+  if (!roomsResult) return;
 
-  console.log(`[chinalive] ${scheduleMatches.length} scheduled, ${roomMap.size} live rooms`);
+  const { liveMap, allRooms } = roomsResult;
+  const now = Date.now();
+  console.log(`[chinalive] ${scheduleMatches.length} scheduled, ${liveMap.size} live rooms`);
 
-  const activeIds = [];
-
-  const cutoff = Date.now() - 4 * 60 * 60 * 1000; // 4 hours ago
-
-  for (const match of scheduleMatches) {
-    const ms = match.matchStatus ?? 0;
-
-    // Skip any match whose kickoff was 4+ hours ago — API never cleans stale live entries
-    if (match.matchTime && match.matchTime < cutoff) continue;
-
-    // Skip fake chat-room entries and postponed matches
-    if (ms === -9999 || ms === -14) continue;
-
-    // Skip not-started matches that have no live anchors yet
-    const liveRoomNums = [];
-    for (const anchor of match.anchors || []) {
-      const rn = String(anchor.anchor?.roomNum || anchor.roomNum || '');
-      if (rn && roomMap.has(rn)) liveRoomNums.push(rn);
-    }
-    if (ms === 0 && liveRoomNums.length === 0) continue;
-
-    const sourceId  = String(match.scheduleId);
-    const dbStatus  = isLiveStatus(ms) ? 'live' : isFinishedStatus(ms) ? 'finished' : 'scheduled';
-
-    const sched = {
-      home_team:    match.hostName    || '',
-      away_team:    match.guestName   || '',
-      league:       match.subCateName || null,
-      home_logo:    absoluteLogo(match.hostIcon),
-      away_logo:    absoluteLogo(match.guestIcon),
-      scheduled_at: match.matchTime ? new Date(match.matchTime).toISOString() : null,
-      score_home:   match.hostScore  != null ? Number(match.hostScore)  : null,
-      score_away:   match.guestScore != null ? Number(match.guestScore) : null,
-      db_status:    dbStatus,
-    };
-
+  const ctx = { liveMap, allRooms, tabId, api_base, referer, now };
+  await runWithConcurrency(scheduleMatches, MATCH_CONCURRENCY, async (match) => {
     try {
-      // Only fetch streams if anchors are currently live
-      const allStreams = [];
-      if (liveRoomNums.length > 0) {
-        const sortedRooms = liveRoomNums
-          .map((rn) => ({ rn, views: roomMap.get(rn)?.viewCount || 0 }))
-          .sort((a, b) => b.views - a.views);
-
-        for (let rank = 0; rank < sortedRooms.length; rank++) {
-          await jitter(300, 900);
-          const streams = await fetchStreams(sortedRooms[rank].rn, api_base, referer).catch(() => []);
-          for (const s of streams) {
-            const isHLS = s.url.includes('.m3u8');
-            if (!isHLS && rank > 0) continue;
-            const priority = isHLS && s.quality === 'HD' ? 10 - rank
-                           : isHLS                       ?  6 - rank
-                           : s.quality === 'HD'          ?  3
-                           :                                2;
-            allStreams.push({ ...s, priority });
-          }
-        }
-      }
-
-      await saveMatch(sched, allStreams, tabId, sourceId);
-      if (dbStatus !== 'finished') activeIds.push(sourceId);
-      console.log(`[chinalive] ${dbStatus} "${sched.home_team} vs ${sched.away_team}" — ${allStreams.length} streams (status=${ms})`);
+      await processMatch(match, ctx);
     } catch (err) {
-      console.error(`[chinalive] Error processing match ${sourceId}:`, err.message);
+      console.error(`[chinalive] Error processing match ${match.scheduleId}:`, err.message);
     }
-  }
+  });
 
-  await markFinished(activeIds);
+  await markFinished();
   console.log('[chinalive] Scrape complete');
 };
 

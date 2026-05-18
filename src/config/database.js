@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  max: 5,
+  max: 8,
   idleTimeoutMillis: 10000,      // evict idle connections aggressively before Neon drops them
   connectionTimeoutMillis: 10000,
 });
@@ -30,6 +30,7 @@ const query = async (text, params) => {
       // Suppress unhandled 'error' events on the checked-out client —
       // these fire when Neon drops the connection mid-query and would
       // otherwise crash the process as an uncaught exception.
+      client.setMaxListeners(20);
       client.on('error', () => {});
       const result = await client.query(text, params);
       client.release();

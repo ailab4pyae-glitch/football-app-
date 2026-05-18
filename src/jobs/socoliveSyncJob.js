@@ -47,4 +47,5 @@ const tick = async () => {
   setTimeout(tick, await getIntervalMs());
 };
 
-tick();
+// Delay first run 15s so chinalive (HTTP) starts first before Playwright browser launches
+setTimeout(tick, 15 * 1000);

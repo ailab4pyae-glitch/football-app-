@@ -294,11 +294,16 @@ module.exports = async function (fastify) {
     const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
 
     if (isChina) {
-      // Route ALL content lines through china-ts so the CDN always sees our Referer
+      // Delivery CDNs (e.g. livehwc4.com) return CORS:* and don't need Referer —
+      // pass their absolute URLs directly to the browser (no china-ts hop needed).
+      // Only relative URLs (on the auth-protected pullsgp CDN) need Referer proxying.
       m3u8 = m3u8.replace(/^([^#\r\n].+)$/gm, (line) => {
-        const abs = line.startsWith('http') ? line
-                  : line.startsWith('/')    ? `${base.origin}${line}`
-                  : `${basePath}${line}`;
+        if (line.startsWith('http')) {
+          // Absolute URL from delivery CDN — browser fetches directly (CORS: *)
+          return line;
+        }
+        // Relative URL on the origin CDN — needs Referer + SSL bypass
+        const abs = line.startsWith('/') ? `${base.origin}${line}` : `${basePath}${line}`;
         if (abs.includes('.m3u8')) return `${apiBase}/api/proxy/stream/${id}`;
         return `${apiBase}/api/proxy/china-ts?url=${encodeURIComponent(abs)}`;
       });

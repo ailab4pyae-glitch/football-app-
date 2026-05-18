@@ -6,7 +6,29 @@ const MAIN_LIVE_LIMIT = 15;
 
 module.exports = async function (fastify, opts) {
   fastify.get('/api/matches', async (request, reply) => {
-    const { tab } = request.query;
+    const { tab, search } = request.query;
+
+    // Team name search — skip cache, run direct DB query
+    if (search?.trim()) {
+      const term = `%${search.trim()}%`;
+      const tabFilter = tab ? ' AND t.slug = $2' : '';
+      const params = tab ? [term, tab] : [term];
+      const { rows } = await db.query(
+        `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
+                m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
+                m.league, t.slug AS source_tab
+         FROM matches m
+         JOIN tabs t ON m.tab_id = t.id
+         WHERE (m.home_team ILIKE $1 OR m.away_team ILIKE $1)${tabFilter}
+         ORDER BY
+           CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
+           m.scheduled_at ASC NULLS LAST
+         LIMIT 50`,
+        params
+      );
+      return rows;
+    }
+
     const cacheKey = tab ? `matches:${tab}` : 'matches:all';
 
     try {

@@ -4,7 +4,7 @@ const { run }      = require('../scrapers/xoilac');
 
 const SLUG     = 'xoilac';
 const TAB_SLUG = 'xoilac';
-const DEFAULT_INTERVAL_MS = parseInt(process.env.SCRAPER_INTERVAL_MS, 10) || 2 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = parseInt(process.env.XOILAC_SYNC_INTERVAL_MS, 10) || 3 * 60 * 1000;
 
 const shouldRun = async () => {
   try {
@@ -47,4 +47,5 @@ const tick = async () => {
   setTimeout(tick, await getIntervalMs());
 };
 
-tick();
+// Delay first run 30s — Playwright scrapers staggered after chinalive (0s) and socolive (15s)
+setTimeout(tick, 30 * 1000);

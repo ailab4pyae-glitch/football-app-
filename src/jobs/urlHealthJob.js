@@ -2,7 +2,7 @@ const db = require('../config/database');
 const { run: rerunSoco }  = require('../scrapers/socolive');
 const { run: rerunChina } = require('../scrapers/chinalive');
 
-const DEFAULT_INTERVAL_MS  = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 10 * 60 * 1000;
+const DEFAULT_INTERVAL_MS  = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 5 * 60 * 1000;
 const DEFAULT_failThreshold = parseInt(process.env.HEALTH_failThreshold, 10)  || 10;
 const FETCH_TIMEOUT_MS = 8000;
 
@@ -25,11 +25,45 @@ const REFERER_BY_SOURCE = {
   xoilac:    'https://xl365.livepingscorex.com/',
 };
 
+// China CDNs frequently use self-signed / mismatched SSL certs — fetch() throws SSL errors
+// and incorrectly marks healthy streams as unhealthy. Use the https module directly with
+// rejectUnauthorized: false so we get the actual HTTP status code instead of an SSL error.
+const checkChinaUrl = (url, referer) => {
+  const { Agent, get: httpsGet } = require('https');
+  const { get: httpGet } = require('http');
+  const isHttps = url.startsWith('https');
+  const proto   = isHttps ? httpsGet : httpGet;
+  const start   = Date.now();
+  return new Promise((resolve) => {
+    const req = proto(url, {
+      method:  'HEAD',
+      timeout: FETCH_TIMEOUT_MS,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        Referer: referer,
+        Origin:  'https://yyzbw8.live',
+        Accept:  '*/*',
+      },
+      ...(isHttps ? { agent: new Agent({ rejectUnauthorized: false }) } : {}),
+    }, (res) => {
+      res.resume();
+      // 2xx or 206 = healthy; 403 = token expired = unhealthy
+      const ok = res.statusCode < 400 || res.statusCode === 206;
+      resolve({ ok, latency: ok ? Date.now() - start : null });
+    });
+    req.on('error',   () => resolve({ ok: false, latency: null }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, latency: null }); });
+  });
+};
+
 const checkUrl = async (url, sourceName) => {
+  const referer = REFERER_BY_SOURCE[sourceName] || null;
+  // China CDNs need SSL bypass — use dedicated checker
+  if (sourceName === 'chinalive') return checkChinaUrl(url, referer || 'https://yyzbw8.live/');
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   const start   = Date.now();
-  const referer = REFERER_BY_SOURCE[sourceName] || null;
   const baseHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     ...(referer ? { Referer: referer } : {}),
@@ -69,7 +103,7 @@ const runHealthCheck = async (failThreshold) => {
        AND (su.expires_at IS NULL OR su.expires_at > NOW())
        AND (su.last_checked IS NULL OR su.last_checked < NOW() - interval '90 seconds')
      ORDER BY su.last_checked ASC NULLS FIRST
-     LIMIT 50`
+     LIMIT 25`
   );
 
   if (streams.length === 0) {
@@ -130,40 +164,29 @@ const expireOldUrls = async () => {
   if (rowCount > 0) console.log(`[urlHealthJob] Expired ${rowCount} stream URL(s)`);
 };
 
-const cleanStaleMatches = async () => {
-  // Scheduled matches whose kickoff passed 2+ hours ago → finished
-  const { rowCount: r1 } = await db.query(
-    `UPDATE matches SET status = 'finished'
-     WHERE status = 'scheduled' AND scheduled_at < NOW() - INTERVAL '2 hours'`
-  );
-  // Stuck live matches: kickoff was 4+ hours ago (covers 90min + HT + extra time)
-  const { rowCount: r3 } = await db.query(
-    `UPDATE matches SET status = 'finished'
-     WHERE status = 'live'
-       AND scheduled_at IS NOT NULL
-       AND scheduled_at < NOW() - INTERVAL '4 hours'`
-  );
-  // Delete finished matches older than 3 days to keep DB lean
-  const { rowCount: r2 } = await db.query(
-    `DELETE FROM matches
-     WHERE status = 'finished' AND created_at < NOW() - INTERVAL '3 days'`
-  );
-  if (r1 > 0) console.log(`[urlHealthJob] Marked ${r1} stale scheduled → finished`);
-  if (r3 > 0) console.log(`[urlHealthJob] Marked ${r3} stuck live → finished`);
-  if (r2 > 0) console.log(`[urlHealthJob] Deleted ${r2} old finished matches`);
-};
+// Match lifecycle (scheduled → live → finished) is owned by finishedMatchCleanupJob.
+// urlHealthJob only manages stream URL health — no match status changes here.
 
 const start = () => {
+  let running = false;
+
   const tick = async () => {
+    if (running) {
+      console.warn('[urlHealthJob] Previous run still in progress — skipping tick');
+      setTimeout(tick, DEFAULT_INTERVAL_MS);
+      return;
+    }
+    running = true;
     try {
       const { intervalMs, failThreshold } = await getHealthConfig();
       await expireOldUrls();
-      await cleanStaleMatches();
       await runHealthCheck(failThreshold);
       setTimeout(tick, intervalMs);
     } catch (err) {
       console.error('[urlHealthJob] Error:', err.message);
       setTimeout(tick, DEFAULT_INTERVAL_MS);
+    } finally {
+      running = false;
     }
   };
 
