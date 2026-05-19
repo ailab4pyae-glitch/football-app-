@@ -486,14 +486,31 @@ const classifyQuality = (url) => {
 };
 
 const parseTokenExpiry = (url) => {
-  const m = url.match(/auth_key=(\d{10})/);
-  if (m) return new Date(parseInt(m[1], 10) * 1000).toISOString();
-  return null;
+  // auth_key can be 10-digit (China-style) or prefixed e.g. 3000001779174600 (SOCO-style).
+  // The actual Unix expiry timestamp is always the last 10 digits before the first '-'.
+  const m = url.match(/auth_key=(\d+)/);
+  if (!m) return null;
+  const ts = parseInt(m[1].slice(-10), 10);
+  if (ts < 1700000000) return null; // sanity check — must be a plausible 2024+ timestamp
+  return new Date(ts * 1000).toISOString();
+};
+
+// Resolve a soco channel iframe URL to the real CDN stream URL.
+// Fetches the embed page and extracts `var urlStream = "..."` from the HTML.
+const resolveStreamUrl = async (iframeUrl) => {
+  const res = await httpsGet(iframeUrl, { Referer: 'https://canetads.com/' });
+  if (!res?.body) return null;
+  const m = res.body.match(/var\s+urlStream\s*=\s*"([^"]+)"/);
+  if (!m) return null;
+  const url = m[1].replace(/\\\//g, '/');
+  if (!url.includes('.m3u8') && !url.includes('.flv')) return null;
+  return url;
 };
 
 // Primary: extract list_stream from the match page HTML — fast, no browser needed.
 // Tries multiple URL slug combinations since socolive inconsistently uses
 // full team name vs short name (e.g. "newcastle-united" vs "newcastle").
+// For each iframe URL in list_stream, resolves the real CDN stream URL via API.
 const extractListStream = async (matchUrls) => {
   const candidates = Array.isArray(matchUrls) ? matchUrls : [matchUrls];
   for (const matchUrl of candidates) {
@@ -504,10 +521,18 @@ const extractListStream = async (matchUrls) => {
     if (!m) continue;
     try {
       const raw = JSON.parse(m[1].replace(/\\\//g, '/'));
-      const urls = [...new Set(raw.flat().filter((u) => u?.startsWith('http')))];
-      if (urls.length > 0) {
-        return urls.map((url) => ({ url, quality: classifyQuality(url) }));
-      }
+      const iframeUrls = [...new Set(raw.flat().filter((u) => u?.startsWith('http')))];
+      if (!iframeUrls.length) continue;
+
+      const streams = (await Promise.all(
+        iframeUrls.map(async (iframeUrl) => {
+          const cdnUrl = await resolveStreamUrl(iframeUrl).catch(() => null);
+          if (!cdnUrl) return null;
+          return { url: cdnUrl, quality: classifyQuality(cdnUrl), priority: 2 };
+        })
+      )).filter(Boolean);
+
+      if (streams.length > 0) return streams;
     } catch (_) {}
   }
   return [];
@@ -645,16 +670,17 @@ const saveMatchToDB = async (match, tabId) => {
       "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1)=split_part($2,'?',1) LIMIT 1",
       [matchId, stream.url]
     );
+    const priority = stream.priority ?? (quality === 'HD' ? 2 : 1);
     if (dup.rows.length) {
       await db.query(
-        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true, fail_count=0 WHERE id=$3',
-        [stream.url, expiresAt, dup.rows[0].id]
+        'UPDATE stream_urls SET url=$1, expires_at=$2, is_healthy=true, fail_count=0, priority=$4 WHERE id=$3',
+        [stream.url, expiresAt, dup.rows[0].id, priority]
       );
     } else {
       await db.query(
         `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
          VALUES ($1,$2,$3,'socolive',$4,true,$5,now())`,
-        [matchId, stream.url, quality, quality === 'HD' ? 2 : 1, expiresAt]
+        [matchId, stream.url, quality, priority, expiresAt]
       );
     }
   }

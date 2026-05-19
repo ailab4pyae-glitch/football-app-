@@ -7,8 +7,7 @@ const STREAM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 
 const REFERER_BY_SOURCE = {
   chinalive: 'https://yyzbw8.live/',
-  socolive:  'https://socolivexx.tv/',
-  xoilac:    'https://xl365.livepingscorex.com/',
+  socolive:  'https://soco.buzzscorelinez.com/',
 };
 
 // ─── In-memory stream URL cache ───────────────────────────────────────────────
@@ -294,17 +293,14 @@ module.exports = async function (fastify) {
     const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
 
     if (isChina) {
-      // Delivery CDNs (e.g. livehwc4.com) return CORS:* and don't need Referer —
-      // pass their absolute URLs directly to the browser (no china-ts hop needed).
-      // Only relative URLs (on the auth-protected pullsgp CDN) need Referer proxying.
+      // Master playlist (pullsgp CDN) contains one child m3u8 on livehwc4 delivery CDN.
+      // livehwc4 has CORS:* — browser can fetch the child m3u8 and its segments directly.
+      // Routing through china-m3u8 adds a server round-trip every 5 s (one segment cycle),
+      // which causes severe buffering on iOS native HLS. Return absolute URLs directly.
+      // Relative URLs (origin CDN, needs Referer) → proxy through china-ts.
       m3u8 = m3u8.replace(/^([^#\r\n].+)$/gm, (line) => {
-        if (line.startsWith('http')) {
-          // Absolute URL from delivery CDN — browser fetches directly (CORS: *)
-          return line;
-        }
-        // Relative URL on the origin CDN — needs Referer + SSL bypass
+        if (line.startsWith('http')) return line; // delivery CDN — browser fetches directly
         const abs = line.startsWith('/') ? `${base.origin}${line}` : `${basePath}${line}`;
-        if (abs.includes('.m3u8')) return `${apiBase}/api/proxy/stream/${id}`;
         return `${apiBase}/api/proxy/china-ts?url=${encodeURIComponent(abs)}`;
       });
     } else {
@@ -334,7 +330,7 @@ module.exports = async function (fastify) {
     if (!record) { reply.code(404); return { error: 'Stream not found' }; }
 
     const { url: streamUrl, source_name } = record;
-    const referer = REFERER_BY_SOURCE[source_name] || 'https://xoilacct.tv/';
+    const referer = REFERER_BY_SOURCE[source_name] || null;
 
     // All scrapers now save the actual CDN URL directly (no channel proxy re-fetch needed).
     // SSL certs on some CDNs are self-signed — rejectUnauthorized:false required.
@@ -432,6 +428,52 @@ module.exports = async function (fastify) {
   //   • Referer / Origin set to yyzbw8.live (required by Chinese CDNs)
   //   • rejectUnauthorized: false  (China CDNs often use self-signed / expired certs)
   //   • Streamed directly — no buffering, no size limit
+
+  // ─── China Live child-playlist proxy ─────────────────────────────────────────
+  // Fetches a child m3u8 (e.g. from livehwc4.com delivery CDN) server-side,
+  // rewrites relative segment URLs to absolute delivery-CDN URLs (CORS:* so
+  // the browser can fetch them directly), and returns the playlist.
+  fastify.get('/api/proxy/china-m3u8', async (request, reply) => {
+    const { url } = request.query;
+    if (!url) { reply.code(400); return { error: 'Missing url' }; }
+
+    let decoded;
+    try { decoded = decodeURIComponent(url); } catch { reply.code(400); return { error: 'Bad url' }; }
+
+    let parsedUrl;
+    try { parsedUrl = new URL(decoded); } catch { reply.code(400); return { error: 'Invalid URL' }; }
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) { reply.code(400); return { error: 'Bad protocol' }; }
+
+    const { hostname } = parsedUrl;
+    if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname)) {
+      reply.code(403); return { error: 'Forbidden' };
+    }
+
+    let body;
+    try {
+      body = await fetchChinaM3u8(decoded);
+    } catch (err) {
+      reply.code(502); return { error: 'CDN unavailable' };
+    }
+
+    const base     = new URL(decoded);
+    const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
+
+    // Rewrite relative segment URLs to absolute so the browser can fetch them directly
+    // (delivery CDNs like livehwc4.com have CORS:* — no proxy hop needed for segments).
+    body = body.replace(/^([^#\r\n].+)$/gm, (line) => {
+      if (line.startsWith('http')) return line;
+      if (line.startsWith('/')) return `${base.origin}${line}`;
+      return `${basePath}${line}`;
+    });
+
+    return reply
+      .header('Content-Type', 'application/vnd.apple.mpegurl')
+      .header('Cache-Control', 'no-store, no-cache')
+      .header('Access-Control-Allow-Origin', '*')
+      .send(body);
+  });
+
   fastify.get('/api/proxy/china-ts', async (request, reply) => {
     const { url } = request.query;
     if (!url) { reply.code(400); return { error: 'Missing url' }; }

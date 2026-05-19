@@ -21,8 +21,7 @@ const getHealthConfig = async () => {
 
 const REFERER_BY_SOURCE = {
   chinalive: 'https://yyzbw8.live/',
-  socolive:  'https://socolivexx.tv/',
-  xoilac:    'https://xl365.livepingscorex.com/',
+  socolive:  'https://soco.buzzscorelinez.com/',
 };
 
 // China CDNs frequently use self-signed / mismatched SSL certs — fetch() throws SSL errors
@@ -117,16 +116,8 @@ const runHealthCheck = async (failThreshold) => {
   let chinaFailed = false;
 
   await Promise.all(streams.map(async (stream) => {
-    // Xoilac channel proxy URLs return HTML (not stream data) — skip direct health check.
-    // The FLV proxy fetches a fresh CDN URL at play time, so these are always "healthy".
-    // Skip HTTP verification for URLs that only work in a browser context:
-    // 1. Channel proxy URLs (livepingscorex.com) — return HTML, not stream data
-    // 2. CDN auth-key URLs (pullsgp, procdnlive, etc.) — CDN blocks server IPs;
-    //    the expires_at field (set by the scraper from the auth_key timestamp) is
-    //    the authoritative health signal — expireOldUrls() handles these.
-    // CDN domains that block server-side requests — skip HTTP check entirely.
-    // Trust expires_at for auth_key URLs; scraper refreshes every 2 min.
-    const isBrowserOnly = stream.url.includes('livepingscorex.com')
+    // Socolive iframe embed URLs and CDN auth-key URLs cannot be verified server-side.
+    const isBrowserOnly = stream.url.includes('buzzscorelinez.com')
       || /[?&]auth_key=\d/.test(stream.url)
       || /wsSecret=/.test(stream.url)
       || stream.url.includes('pullsgp.yyzb456.top')

@@ -83,46 +83,8 @@ module.exports = async function (fastify, opts) {
       );
       matches = result.rows;
     } else {
-      // All non-main-live queries return the same canonical shape as main-live:
-      // source_tab and league are always present so the frontend never needs special-casing.
-      // soco-live tab: include socolive matches first, then supplement with
-      // live matches from xoilac/chinalive that have no socolive duplicate.
-      const socoQuery = tab === 'soco-live'
-        ? `SELECT * FROM (
-             SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
-                    m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
-                    m.league, t.slug AS source_tab
-             FROM matches m
-             JOIN tabs t ON m.tab_id = t.id
-             WHERE t.slug = 'soco-live'
-             UNION
-             SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
-                    m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
-                    m.league, t.slug AS source_tab
-             FROM matches m
-             JOIN tabs t ON m.tab_id = t.id
-             WHERE m.status = 'live'
-               AND m.source_name = 'xoilac'
-               AND EXISTS (
-                 SELECT 1 FROM stream_urls su
-                 WHERE su.match_id = m.id AND su.is_healthy = true
-                   AND (su.expires_at IS NULL OR su.expires_at > NOW())
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM matches s
-                 JOIN tabs st ON s.tab_id = st.id
-                 WHERE st.slug = 'soco-live'
-                   AND lower(trim(s.home_team)) = lower(trim(m.home_team))
-                   AND lower(trim(s.away_team)) = lower(trim(m.away_team))
-               )
-           ) combined
-           ORDER BY
-             CASE status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
-             scheduled_at ASC NULLS LAST`
-        : null
-
       const query = tab
-        ? (socoQuery || `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
+        ? `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
                   m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
                   m.league, t.slug AS source_tab
            FROM matches m
@@ -131,7 +93,7 @@ module.exports = async function (fastify, opts) {
            ORDER BY
              CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
              m.scheduled_at ASC NULLS LAST,
-             m.created_at ASC`)
+             m.created_at ASC`
         : `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
                   m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
                   m.league, t.slug AS source_tab
@@ -139,8 +101,7 @@ module.exports = async function (fastify, opts) {
            JOIN tabs t ON m.tab_id = t.id
            ORDER BY m.scheduled_at ASC`;
 
-      const params = (tab && tab !== 'soco-live') ? [tab] : [];
-      const result = await db.query(query, params);
+      const result = await db.query(query, tab ? [tab] : []);
       matches = result.rows;
     }
 

@@ -5,9 +5,8 @@ const scraperLog   = require('../config/scraperLog');
 const scraperState = require('../config/scraperState');
 const { run: runChinalive } = require('../scrapers/chinalive');
 const { run: runSocolive  } = require('../scrapers/socolive');
-const { run: runXoilac    } = require('../scrapers/xoilac');
 
-const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive, xoilac: runXoilac };
+const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive };
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';

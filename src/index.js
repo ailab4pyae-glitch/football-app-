@@ -54,9 +54,7 @@ fastify.register(require('./routes/auth').routes);
 
 require('./jobs/syncMatches');
 require('./jobs/socoliveSyncJob');
-require('./jobs/socoliveApiSyncJob');
 require('./jobs/chinaliveSyncJob');
-require('./jobs/xoilacSyncJob');
 // myanmarTvSyncJob disabled — streams are geo-restricted; URLs must be entered manually via Admin → TV & Radio
 require('./jobs/urlHealthJob');
 require('./jobs/finishedMatchCleanupJob');

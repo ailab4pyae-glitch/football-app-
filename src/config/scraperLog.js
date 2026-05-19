@@ -8,7 +8,6 @@ const buf = {}; // slug → [{ ts, level, msg }]
 const SLUG_NORMALIZE = {
   socolivesynccjob: 'socolive', socolivesynccJob: 'socolive', socoliveSyncJob: 'socolive',
   chinalivesynccjob: 'chinalive', chinaliveSyncJob: 'chinalive',
-  xoilacsynccjob: 'xoilac', xoilacSyncJob: 'xoilac',
   myanmartvsynccjob: 'myanmartv', myanmarTvSyncJob: 'myanmartv',
   urlhealthjob: 'health', urlHealthJob: 'health',
   syncmatches: 'sync', syncMatches: 'sync',
