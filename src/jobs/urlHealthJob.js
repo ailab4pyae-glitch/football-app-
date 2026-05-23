@@ -115,44 +115,61 @@ const runHealthCheck = async (failThreshold) => {
   let socoFailed  = false;
   let chinaFailed = false;
 
-  await Promise.all(streams.map(async (stream) => {
-    // Socolive iframe embed URLs and CDN auth-key URLs cannot be verified server-side.
-    const isBrowserOnly = stream.url.includes('buzzscorelinez.com')
-      || /[?&]auth_key=\d/.test(stream.url)
-      || /wsSecret=/.test(stream.url)
-      || stream.url.includes('pullsgp.yyzb456.top')
-      || stream.url.includes('procdnlive.com')
-      || stream.url.includes('yyzb456.top');
+  // Separate browser-only (skip check) from checkable streams
+  const browserOnly = streams.filter((s) =>
+    s.url.includes('buzzscorelinez.com')
+    || /[?&]auth_key=\d/.test(s.url)
+    || /wsSecret=/.test(s.url)
+    || s.url.includes('pullsgp.yyzb456.top')
+    || s.url.includes('procdnlive.com')
+    || s.url.includes('yyzb456.top')
+  );
+  const checkable = streams.filter((s) => !browserOnly.includes(s));
 
-    if (isBrowserOnly) {
-      await db.query(
-        'UPDATE stream_urls SET last_checked = NOW() WHERE id = $1',
-        [stream.id]
-      );
-      return;
-    }
+  // Check all checkable streams concurrently
+  const results = await Promise.all(
+    checkable.map(async (stream) => {
+      const { ok, latency } = await checkUrl(stream.url, stream.source_name);
+      const newFailCount = ok ? 0 : stream.fail_count + 1;
+      const isHealthy    = ok && newFailCount < failThreshold;
 
-    const { ok, latency } = await checkUrl(stream.url, stream.source_name);
-    const newFailCount = ok ? 0 : stream.fail_count + 1;
-
-    await db.query(
-      `UPDATE stream_urls
-       SET is_healthy   = $1,
-           fail_count   = $2,
-           last_checked = NOW(),
-           latency_ms   = COALESCE($4, latency_ms)
-       WHERE id = $3`,
-      [ok && newFailCount < failThreshold, newFailCount, stream.id, latency]
-    );
-
-    if (!ok) {
-      console.warn(`[urlHealthJob] UNHEALTHY: ${stream.url} (fail_count=${newFailCount})`);
-      if (newFailCount >= failThreshold) {
-        if (stream.source_name === 'socolive')  socoFailed  = true;
-        if (stream.source_name === 'chinalive') chinaFailed = true;
+      if (!ok) {
+        console.warn(`[urlHealthJob] UNHEALTHY: ${stream.url} (fail_count=${newFailCount})`);
+        if (newFailCount >= failThreshold) {
+          if (stream.source_name === 'socolive')  socoFailed  = true;
+          if (stream.source_name === 'chinalive') chinaFailed = true;
+        }
       }
-    }
-  }));
+      return { id: stream.id, isHealthy, newFailCount, latency };
+    })
+  );
+
+  // Batch UPDATE all checked streams in one query using UNNEST
+  if (results.length > 0) {
+    const ids        = results.map((r) => r.id);
+    const healthyArr = results.map((r) => r.isHealthy);
+    const failArr    = results.map((r) => r.newFailCount);
+    const latencyArr = results.map((r) => r.latency ?? null);
+    await db.query(
+      `UPDATE stream_urls su
+       SET is_healthy   = v.is_healthy,
+           fail_count   = v.fail_count,
+           last_checked = NOW(),
+           latency_ms   = COALESCE(v.latency_ms, su.latency_ms)
+       FROM UNNEST($1::uuid[], $2::bool[], $3::int[], $4::int[])
+         AS v(id, is_healthy, fail_count, latency_ms)
+       WHERE su.id = v.id`,
+      [ids, healthyArr, failArr, latencyArr]
+    );
+  }
+
+  // Batch touch browser-only streams (single query)
+  if (browserOnly.length > 0) {
+    await db.query(
+      'UPDATE stream_urls SET last_checked = NOW() WHERE id = ANY($1::uuid[])',
+      [browserOnly.map((s) => s.id)]
+    );
+  }
 
   if (socoFailed)  await tryRerun(rerunSoco,  'socolive');
   if (chinaFailed) await tryRerun(rerunChina, 'chinalive');

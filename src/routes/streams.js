@@ -1,8 +1,7 @@
 const db    = require('../config/database');
 const redis = require('../config/redis');
-const { runForMatch }         = require('../scrapers/chinalive');
-const { STREAM_CACHE_TTL_SEC } = require('../jobs/chinaliveSyncJob');
-
+const { runForMatch }              = require('../scrapers/chinalive');
+const { STREAM_CACHE_TTL_SEC }     = require('../jobs/chinaliveSyncJob');
 // How long to wait for another process holding the scrape lock (ms)
 const LOCK_WAIT_MS    = 15000;
 const LOCK_POLL_MS    = 500;

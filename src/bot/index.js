@@ -52,7 +52,7 @@ const formatPlan = (p) => {
   return [
     `${planEmoji(p.duration_days)} *${p.name}*`,
     `💰 ${fmt(p.price)} ${p.currency}`,
-    `⏱ ${p.duration_days} days`,
+    `⏱ ${p.duration_days} ရက်`,
     features,
   ].join('\n');
 };
@@ -80,23 +80,23 @@ bot.start(async (ctx) => {
     const sub  = check.subscription;
     const exp  = new Date(sub.expires_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
     await ctx.replyWithMarkdown(
-      `✅ *Welcome back, ${name}!*\n\n` +
-      `Your *${sub.plan_name}* subscription is active.\n` +
-      `📅 Expires: *${exp}*\n\n` +
-      `🔗 Watch live: ${WEBSITE_URL}`,
+      `✅ *ကြိုဆိုပါသည်, ${name}!*\n\n` +
+      `သင့် *${sub.plan_name}* စာရင်းသွင်းမှု လက်ရှိတက်ကြွနေသည်။\n` +
+      `📅 သက်တမ်းကုန်သည့်ရက်: *${exp}*\n\n` +
+      `🔗 တိုက်ရိုက်ကြည့်ရန်: ${WEBSITE_URL}`,
       Markup.keyboard([
-        ['📋 Plans', '📱 My Status'],
-        ['💬 Support'],
+        ['📋 Plan များ', '📱 ကျွန်ုပ်၏ Status'],
+        ['💬 အကူအညီ'],
       ]).resize()
     );
   } else {
     await ctx.replyWithMarkdown(
-      `⚽ *Welcome to Football Live, ${name}!*\n\n` +
-      `Watch premium football live streams anytime.\n\n` +
-      `Tap *📋 Plans* to see our subscription packages.`,
+      `⚽ *Rangoon TV မှ ကြိုဆိုပါသည်, ${name}!*\n\n` +
+      `ဘောလုံး တိုက်ရိုက်ထုတ်လွှင့်မှုများကို အချိန်မရွေး ကြည့်ရှုနိုင်သည်။\n\n` +
+      `*📋 Plan များ* ကိုနှိပ်၍ စာရင်းသွင်းမှု package များကို ကြည့်ရှုပါ။`,
       Markup.keyboard([
-        ['📋 Plans', '📱 My Status'],
-        ['💬 Support'],
+        ['📋 Plan များ', '📱 ကျွန်ုပ်၏ Status'],
+        ['💬 အကူအညီ'],
       ]).resize()
     );
   }
@@ -107,11 +107,11 @@ bot.start(async (ctx) => {
 const sendPlans = async (ctx) => {
   const plans = await apiGet('/api/subscription/plans').catch(() => []);
   if (!plans.length) {
-    return ctx.reply('No plans available right now. Try again later.');
+    return ctx.reply('လောလောဆယ် Plan များ မရရှိနိုင်ပါ။ နောက်မှ ထပ်စမ်းကြည့်ပါ။');
   }
 
   await ctx.replyWithMarkdown(
-    `🎯 *Choose Your Plan*\n\n` +
+    `🎯 *သင့် Plan ကို ရွေးချယ်ပါ*\n\n` +
     plans.map(formatPlan).join('\n\n─────────────\n\n'),
     Markup.inlineKeyboard(
       plans.map((p) => [
@@ -124,6 +124,7 @@ const sendPlans = async (ctx) => {
   );
 };
 
+bot.hears('📋 Plan များ', sendPlans);
 bot.hears('📋 Plans', sendPlans);
 bot.command('plans', sendPlans);
 
@@ -133,7 +134,7 @@ bot.action(/^SELECT_PLAN:(\d+)$/, async (ctx) => {
   const planId = parseInt(ctx.match[1]);
   const plans  = await apiGet('/api/subscription/plans').catch(() => []);
   const plan   = plans.find((p) => p.id === planId);
-  if (!plan) return ctx.answerCbQuery('Plan not found');
+  if (!plan) return ctx.answerCbQuery('Plan မတွေ့ပါ');
 
   const session = getSession(ctx.from.id);
   session.planId = planId;
@@ -142,12 +143,12 @@ bot.action(/^SELECT_PLAN:(\d+)$/, async (ctx) => {
 
   await ctx.answerCbQuery();
   await ctx.replyWithMarkdown(
-    `You selected: *${plan.name}* — ${fmt(plan.price)} ${plan.currency}\n\n` +
-    `Choose your payment method:`,
+    `သင်ရွေးချယ်သည်: *${plan.name}* — ${fmt(plan.price)} ${plan.currency}\n\n` +
+    `ငွေပေးချေမှု နည်းလမ်းကို ရွေးချယ်ပါ:`,
     Markup.inlineKeyboard([
-      PAYMENT_KPAY    ? [Markup.button.callback('📱 KPay',     `PAY_METHOD:kpay`)]    : [],
-      PAYMENT_WAVEPAY ? [Markup.button.callback('🌊 WavePay',  `PAY_METHOD:wavepay`)] : [],
-      PAYMENT_BANK    ? [Markup.button.callback('🏦 Bank Transfer', `PAY_METHOD:bank`)] : [],
+      PAYMENT_KPAY    ? [Markup.button.callback('📱 KPay',          `PAY_METHOD:kpay`)]    : [],
+      PAYMENT_WAVEPAY ? [Markup.button.callback('🌊 WavePay',       `PAY_METHOD:wavepay`)] : [],
+      PAYMENT_BANK    ? [Markup.button.callback('🏦 ဘဏ်လွှဲပြောင်း', `PAY_METHOD:bank`)]   : [],
     ].filter((row) => row.length))
   );
 });
@@ -157,29 +158,29 @@ bot.action(/^SELECT_PLAN:(\d+)$/, async (ctx) => {
 bot.action(/^PAY_METHOD:(kpay|wavepay|bank)$/, async (ctx) => {
   const method  = ctx.match[1];
   const session = getSession(ctx.from.id);
-  if (!session.planId) return ctx.reply('Please select a plan first. Tap 📋 Plans');
+  if (!session.planId) return ctx.reply('ကျေးဇူးပြု၍ အရင် Plan ရွေးပါ။ 📋 Plan များ ကိုနှိပ်ပါ။');
 
   session.paymentMethod = method;
   session.step = 'waiting_screenshot';
 
   const accountMap = {
-    kpay:    { label: 'KPay',     number: PAYMENT_KPAY },
-    wavepay: { label: 'WavePay',  number: PAYMENT_WAVEPAY },
-    bank:    { label: 'Bank',     number: PAYMENT_BANK },
+    kpay:    { label: 'KPay',          number: PAYMENT_KPAY },
+    wavepay: { label: 'WavePay',       number: PAYMENT_WAVEPAY },
+    bank:    { label: 'ဘဏ်လွှဲပြောင်း', number: PAYMENT_BANK },
   };
   const acc = accountMap[method];
 
   await ctx.answerCbQuery();
   await ctx.replyWithMarkdown(
-    `💳 *Payment Instructions*\n\n` +
+    `💳 *ငွေပေးချေမှု လမ်းညွှန်*\n\n` +
     `Plan: *${session.plan.name}*\n` +
-    `Amount: *${fmt(session.plan.price)} ${session.plan.currency}*\n` +
-    `Method: *${acc.label}*\n\n` +
-    `📲 Send payment to:\n` +
+    `ငွေပမာဏ: *${fmt(session.plan.price)} ${session.plan.currency}*\n` +
+    `နည်းလမ်း: *${acc.label}*\n\n` +
+    `📲 အောက်ပါ နံပါတ်သို့ ငွေလွှဲပါ:\n` +
     `\`${acc.number}\`\n\n` +
-    `⚠️ *After paying:*\n` +
-    `Take a screenshot of your payment confirmation and send it here.\n\n` +
-    `We will verify and activate your subscription within *1 hour*.`
+    `⚠️ *ငွေပေးပြီးနောက်:*\n` +
+    `ငွေပေးချေမှု အတည်ပြုချက် screenshot ကို ဤနေရာတွင် ပို့ပါ။\n\n` +
+    `ကျွန်ုပ်တို့ *၁ နာရီ* အတွင်း စစ်ဆေးပြီး သင့် subscription ကို အသက်သွင်းပေးမည်။`
   );
 });
 
@@ -189,7 +190,7 @@ bot.on('photo', async (ctx) => {
   const session = getSession(ctx.from.id);
 
   if (session.step !== 'waiting_screenshot') {
-    return ctx.reply('Please select a plan and payment method first. Tap 📋 Plans');
+    return ctx.reply('ကျေးဇူးပြု၍ အရင် Plan နှင့် ငွေပေးချေမှု နည်းလမ်းကို ရွေးပါ။ 📋 Plan များ ကိုနှိပ်ပါ။');
   }
 
   // Use highest-resolution photo
@@ -210,30 +211,29 @@ bot.on('photo', async (ctx) => {
   });
 
   if (result.error) {
-    return ctx.reply(`❌ Error: ${result.error}. Please try again or contact support.`);
+    return ctx.reply(`❌ အမှား: ${result.error}။ ထပ်မံကြိုးစားပါ သို့မဟုတ် အကူအညီရယူပါ။`);
   }
 
   clearSession(ctx.from.id);
 
   await ctx.replyWithMarkdown(
-    `✅ *Payment screenshot received!*\n\n` +
+    `✅ *ငွေပေးချေမှု screenshot လက်ခံရရှိပြီ!*\n\n` +
     `Transaction ID: \`${result.transaction_id}\`\n\n` +
-    `Our team will verify your payment and activate your subscription within *1 hour*.\n\n` +
-    `You'll receive a confirmation message here once approved.`
+    `ကျွန်ုပ်တို့အဖွဲ့ *၁ နာရီ* အတွင်း စစ်ဆေးပြီး သင့် subscription ကို အသက်သွင်းပေးမည်။\n\n` +
+    `အတည်ပြုပြီးသည်နှင့် ဤနေရာတွင် အကြောင်းကြားပေးမည်။`
   );
 
   // Notify admin
   if (ADMIN_CHAT_ID) {
     await ctx.telegram.sendMessage(
       ADMIN_CHAT_ID,
-      `🔔 *New Payment Received*\n\n` +
-      `User: @${ctx.from.username || ctx.from.first_name} (ID: ${ctx.from.id})\n` +
+      `🔔 *ငွေပေးချေမှု အသစ်ရရှိသည်*\n\n` +
+      `အသုံးပြုသူ: @${ctx.from.username || ctx.from.first_name} (ID: ${ctx.from.id})\n` +
       `Plan: ${session.plan.name} — ${fmt(session.plan.price)} ${session.plan.currency}\n` +
-      `Method: ${session.paymentMethod || 'unknown'}\n` +
+      `နည်းလမ်း: ${session.paymentMethod || 'မသိ'}\n` +
       `Transaction ID: ${result.transaction_id}`,
       { parse_mode: 'Markdown' }
     ).catch(() => {});
-    // Forward the screenshot to admin
     await ctx.telegram.forwardMessage(ADMIN_CHAT_ID, ctx.chat.id, ctx.message.message_id).catch(() => {});
   }
 });
@@ -242,38 +242,46 @@ bot.on('photo', async (ctx) => {
 
 const sendStatus = async (ctx) => {
   const check = await apiGet(`/api/subscription/check?telegram_id=${ctx.from.id}`).catch(() => null);
-  if (!check) return ctx.reply('Unable to check status. Try again later.');
+  if (!check) return ctx.reply('Status စစ်ဆေး၍ မရပါ။ နောက်မှ ထပ်စမ်းကြည့်ပါ။');
 
   if (check.active) {
     const sub  = check.subscription;
     const exp  = new Date(sub.expires_at);
     const days = Math.ceil((exp - Date.now()) / 86400000);
     await ctx.replyWithMarkdown(
-      `📱 *Your Subscription*\n\n` +
+      `📱 *သင့် Subscription*\n\n` +
       `Plan: *${sub.plan_name}*\n` +
-      `Status: ✅ Active\n` +
-      `Expires: *${exp.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}*\n` +
-      `Days remaining: *${days}*\n\n` +
-      `🔗 Watch now: ${WEBSITE_URL}`
+      `အခြေအနေ: ✅ တက်ကြွနေသည်\n` +
+      `သက်တမ်းကုန်သည့်ရက်: *${exp.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}*\n` +
+      `ကျန်ရက်: *${days} ရက်*\n\n` +
+      `🔗 ယခုကြည့်ရန်: ${WEBSITE_URL}`
     );
   } else {
     await ctx.replyWithMarkdown(
-      `❌ *No active subscription*\n\n` +
-      `Tap 📋 Plans to subscribe and unlock all live streams.`
+      `❌ *Subscription မရှိသေးပါ*\n\n` +
+      `📋 Plan များ ကိုနှိပ်၍ စာရင်းသွင်းပြီး တိုက်ရိုက်ထုတ်လွှင့်မှုများ ကြည့်ရှုပါ။`
     );
   }
 };
 
+bot.hears('📱 ကျွန်ုပ်၏ Status', sendStatus);
 bot.hears('📱 My Status', sendStatus);
 bot.command('status', sendStatus);
 
 // ── Support ───────────────────────────────────────────────────────────────────
 
+bot.hears('💬 အကူအညီ', (ctx) =>
+  ctx.replyWithMarkdown(
+    `💬 *အကူအညီ*\n\n` +
+    `ငွေပေးချေမှု ပြဿနာများ သို့မဟုတ် မေးခွန်းများအတွက် admin ကို တိုက်ရိုက် ဆက်သွယ်ပါ။\n\n` +
+    `သင့်တွင် Transaction ID ရှိပါက ထည့်သွင်းဖော်ပြပါ။`
+  )
+);
 bot.hears('💬 Support', (ctx) =>
   ctx.replyWithMarkdown(
-    `💬 *Support*\n\n` +
-    `For payment issues or questions, please contact our admin directly.\n\n` +
-    `Include your *Transaction ID* if you have one.`
+    `💬 *အကူအညီ*\n\n` +
+    `ငွေပေးချေမှု ပြဿနာများ သို့မဟုတ် မေးခွန်းများအတွက် admin ကို တိုက်ရိုက် ဆက်သွယ်ပါ။\n\n` +
+    `သင့်တွင် Transaction ID ရှိပါက ထည့်သွင်းဖော်ပြပါ။`
   )
 );
 
@@ -285,7 +293,7 @@ bot.hears('💬 Support', (ctx) =>
 
 bot.catch((err, ctx) => {
   console.error(`[bot] Error for ${ctx.updateType}:`, err.message);
-  ctx.reply('Something went wrong. Please try again.').catch(() => {});
+  ctx.reply('တစ်ခုခု မှားယွင်းနေသည်။ ထပ်မံကြိုးစားပါ။').catch(() => {});
 });
 
 bot.launch({ dropPendingUpdates: true });

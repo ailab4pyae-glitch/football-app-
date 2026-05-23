@@ -13,7 +13,8 @@ fastify.register(require('@fastify/env'), {
       REDIS_URL:    { type: 'string', default: '' },
       PORT:         { type: 'number', default: 3050 },
       NODE_ENV:     { type: 'string', default: 'development' },
-      ADMIN_API_KEY:{ type: 'string', default: '' }
+      ADMIN_API_KEY:   { type: 'string', default: '' },
+      MOBILE_API_KEY:  { type: 'string', default: '' }
     }
   }
 });
@@ -24,11 +25,20 @@ fastify.register(require('@fastify/cors'), {
   credentials: true,
 });
 
-// Rate limiting — 200 req/min globally; login endpoint gets its own tighter limit
+// Global rate limit — 200 req/min per IP
 fastify.register(require('@fastify/rate-limit'), {
   max: 200,
   timeWindow: '1 minute',
   skipOnError: true,
+  // Auth endpoints: tighter limit to slow brute-force token guessing
+  keyGenerator: (request) => {
+    const path = request.routerPath || request.url;
+    if (path === '/api/auth/check' || path === '/api/auth/activate') {
+      return `auth:${request.ip}`;
+    }
+    return request.ip;
+  },
+  errorResponseBuilder: () => ({ error: 'Too many requests — slow down' }),
 });
 
 

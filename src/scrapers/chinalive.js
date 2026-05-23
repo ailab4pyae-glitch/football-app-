@@ -1,6 +1,7 @@
 const https = require('https');
 const http  = require('http');
 const db = require('../config/database');
+const { resolveLogos } = require('../services/teamLogos');
 
 const CHINA_DEFAULTS = {
   api_base: 'https://json.yyzb456.top',
@@ -194,8 +195,10 @@ const saveMatch = async (sched, streams, tabId, sourceId) => {
   const away_team  = sched.away_team  || '';
   const title      = home_team && away_team ? `${home_team} vs ${away_team}` : home_team;
   const league     = sched.league     || null;
-  const home_logo  = sched.home_logo  || null;
-  const away_logo  = sched.away_logo  || null;
+  // Resolve logos — saves to team_logos table so admin-added matches can reuse them
+  const { home_logo, away_logo } = await resolveLogos(
+    home_team, away_team, sched.home_logo || null, sched.away_logo || null
+  );
   const scheduledAt = sched.scheduled_at || null;
   const score_home  = sched.score_home ?? null;
   const score_away  = sched.score_away ?? null;
@@ -343,7 +346,7 @@ const isFinishedStatus = (s) => s >= 10;
 const PRE_FETCH_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 const MATCH_CONCURRENCY   = 4;              // process 4 matches in parallel
 
-const processMatch = async (match, { liveMap, allRooms, tabId, api_base, referer, now }) => {
+const processMatch = async (match, { liveMap, allRooms, tabId, api_base, referer, now, fast }) => {
   const ms     = match.matchStatus ?? 0;
   const cutoff = now - 4 * 60 * 60 * 1000;
 
@@ -401,7 +404,7 @@ const processMatch = async (match, { liveMap, allRooms, tabId, api_base, referer
       .sort((a, b) => b.views - a.views);
 
     for (let rank = 0; rank < sortedRooms.length; rank++) {
-      if (!ctx.fast) await jitter(300, 800);
+      if (!fast) await jitter(300, 800);
       const streams = await fetchStreams(sortedRooms[rank].rn, api_base, referer).catch(() => []);
       for (const s of streams) {
         const isHLS = s.url.includes('.m3u8');

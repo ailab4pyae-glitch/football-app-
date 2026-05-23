@@ -5,6 +5,7 @@ const scraperLog   = require('../config/scraperLog');
 const scraperState = require('../config/scraperState');
 const { run: runChinalive, runForMatch } = require('../scrapers/chinalive');
 const { run: runSocolive               } = require('../scrapers/socolive');
+const { lookupLogo, resolveLogos       } = require('../services/teamLogos');
 
 const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive };
 
@@ -252,14 +253,19 @@ module.exports = async function adminRoutes(fastify) {
     const tab_id = tabRes.rows[0].id;
 
     const matchTitle = title || `${home_team} vs ${away_team}`;
+
+    // Auto-resolve logos from team_logos DB if not provided by admin
+    const { home_logo: resolvedHome, away_logo: resolvedAway } =
+      await resolveLogos(home_team, away_team, home_logo || null, away_logo || null);
+
     const { rows } = await db.query(
       `INSERT INTO matches
          (tab_id, title, home_team, away_team, home_logo, away_logo, league,
           status, scheduled_at, source_name, source_match_id, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'manual',gen_random_uuid()::text,now())
-       RETURNING id, title, home_team, away_team, league, status, scheduled_at`,
+       RETURNING id, title, home_team, away_team, home_logo, away_logo, league, status, scheduled_at`,
       [tab_id, matchTitle, home_team, away_team,
-       home_logo || null, away_logo || null, league || null,
+       resolvedHome || null, resolvedAway || null, league || null,
        status, scheduled_at || null]
     );
     await bust(`matches:${tab_slug}`, 'matches:all', 'matches:main-live');
@@ -350,6 +356,24 @@ module.exports = async function adminRoutes(fastify) {
     await bust(`streams:${res.rows[0].match_id}`);
     reply.code(204);
     return null;
+  });
+
+  // ── Team Logo Lookup ────────────────────────────────────────────────────────
+  // GET /api/admin/teams/logo?name=Manchester+United
+  // Returns the best logo URL for a team from team_logos DB or Wikipedia fallback.
+  fastify.get('/api/admin/teams/logo', { preHandler: requireJwt }, async (request, reply) => {
+    const { name } = request.query;
+    if (!name?.trim()) { reply.code(400); return { error: 'name is required' }; }
+    const logo_url = await lookupLogo(name.trim(), null);
+    return { name: name.trim(), logo_url: logo_url || null };
+  });
+
+  // GET /api/admin/teams/logos?home=X&away=Y  — resolve both at once
+  fastify.get('/api/admin/teams/logos', { preHandler: requireJwt }, async (request, reply) => {
+    const { home, away } = request.query;
+    if (!home && !away) { reply.code(400); return { error: 'home or away name required' }; }
+    const { home_logo, away_logo } = await resolveLogos(home || '', away || '', null, null);
+    return { home_logo: home_logo || null, away_logo: away_logo || null };
   });
 
   // ── App Config ─────────────────────────────────────────────────────────────

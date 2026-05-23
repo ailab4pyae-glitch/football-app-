@@ -23,6 +23,7 @@
     "playwright": "^1.40.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "telegraf": "^4.16.3",
     "uuid": "^9.0.1"
   },
   "devDependencies": {

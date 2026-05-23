@@ -30,7 +30,7 @@ const fetchLogoFromWikipedia = async (teamName) => {
       `https://en.wikipedia.org/w/api.php?action=query&list=search` +
       `&srsearch=${encodeURIComponent(teamName + ' football club')}` +
       `&format=json&srlimit=3`,
-      { headers: { 'User-Agent': WP_UA }, signal: AbortSignal.timeout(6000) }
+      { headers: { 'User-Agent': WP_UA }, signal: AbortSignal.timeout(4000) }
     );
     const results = (await searchRes.json()).query?.search || [];
     const hit = results.find((r) =>
@@ -40,7 +40,7 @@ const fetchLogoFromWikipedia = async (teamName) => {
 
     const summaryRes = await fetch(
       `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title.replace(/ /g, '_'))}`,
-      { headers: { 'User-Agent': WP_UA }, signal: AbortSignal.timeout(6000) }
+      { headers: { 'User-Agent': WP_UA }, signal: AbortSignal.timeout(4000) }
     );
     return (await summaryRes.json()).thumbnail?.source || null;
   } catch { return null; }
