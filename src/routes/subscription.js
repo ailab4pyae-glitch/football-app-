@@ -352,9 +352,10 @@ module.exports = async function subscriptionRoutes(fastify) {
 
   // Admin approve (same logic as N8N but JWT-protected)
   fastify.put('/api/admin/subscription/transactions/:id/approve', { preHandler: requireJwt }, async (request, reply) => {
+    try {
     const { id } = request.params;
     const txnRes = await db.query(
-      `SELECT t.*, p.duration_days FROM transactions t JOIN subscription_plans p ON p.id=t.plan_id WHERE t.id=$1`, [id]
+      `SELECT t.*, p.duration_days, p.name AS plan_name FROM transactions t JOIN subscription_plans p ON p.id=t.plan_id WHERE t.id=$1`, [id]
     );
     if (!txnRes.rows.length) { reply.code(404); return { error: 'Not found' }; }
     const txn = txnRes.rows[0];
@@ -372,8 +373,14 @@ module.exports = async function subscriptionRoutes(fastify) {
     );
     const uRes = await db.query('SELECT telegram_id FROM tg_users WHERE id=$1', [txn.user_id]);
     if (uRes.rows[0]) await bustSubCache(uRes.rows[0].telegram_id);
-    await generateDeviceToken(txn.user_id, txn.plan_name || '', expiresAt).catch(() => {});
+    await generateDeviceToken(txn.user_id, txn.plan_name || '', expiresAt).catch((e) => {
+      console.error('[approve] generateDeviceToken failed:', e.message);
+    });
     return { ok: true, expires_at: expiresAt, telegram_id: uRes.rows[0]?.telegram_id };
+    } catch (e) {
+      console.error('[approve] ERROR:', e.message, e.stack);
+      reply.code(500); return { error: e.message };
+    }
   });
 
   fastify.put('/api/admin/subscription/transactions/:id/reject', { preHandler: requireJwt }, async (request, reply) => {

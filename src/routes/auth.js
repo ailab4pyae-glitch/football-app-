@@ -56,13 +56,13 @@ const generateDeviceToken = async (userId, planName, expiresAt) => {
     const activateUrl = `${WEBSITE_URL}?activate=${token}`;
     const expDate     = new Date(expiresAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
     await sendTelegramMsg(telegram_id,
-      `✅ *Premium Activated!*\n\n` +
-      `Hello ${full_name || 'there'} 👋\n` +
+      `✅ *Premium အသက်ဝင်ပြီ!*\n\n` +
+      `မင်္ဂလာပါ ${full_name || ''} 👋\n` +
       `Plan: *${planName}*\n` +
-      `Expires: *${expDate}*\n\n` +
-      `Tap below to unlock premium on your browser/app:\n` +
-      `👉 [Activate Premium](${activateUrl})\n\n` +
-      `_This link registers your device. Only 1 device at a time._`
+      `သက်တမ်းကုန်သည့်ရက်: *${expDate}*\n\n` +
+      `အောက်ပါ link ကိုနှိပ်ပြီး premium unlock လုပ်ပါ:\n` +
+      `👉 [Premium Activate လုပ်ရန်](${activateUrl})\n\n` +
+      `_ဤ link သည် သင့် device တစ်ခုတည်းအတွက်သာ ဖြစ်သည်။_`
     );
   }
 

@@ -8,10 +8,10 @@ const SLUG     = 'chinalive';
 const TAB_SLUG = 'china-live';
 
 // How long before kickoff to pre-warm stream URLs (ms)
-const PREWARM_BEFORE_MS = 10 * 60 * 1000;  // 10 minutes
+const PREWARM_BEFORE_MS = 25 * 60 * 1000;  // 25 minutes
 
 // How often to re-warm URLs while a match is live (ms)
-const REWARM_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const REWARM_INTERVAL_MS = 12 * 60 * 1000; // 12 minutes
 
 // How often to sync today's schedule (ms)
 const SCHEDULE_SYNC_INTERVAL_MS = parseInt(process.env.CHINA_SCHEDULE_SYNC_MS, 10) || 6 * 60 * 60 * 1000; // 6 hours
@@ -199,16 +199,17 @@ const scheduleUpcoming = async () => {
 // ─── Main schedule sync tick ──────────────────────────────────────────────────
 
 const tick = async () => {
-  const src = await getSourceConfig();
+  const src      = await getSourceConfig();
+  const interval = src.config?.sync_interval_ms ?? SCHEDULE_SYNC_INTERVAL_MS;
 
   if (!(await shouldRun(src))) {
-    setTimeout(tick, SCHEDULE_SYNC_INTERVAL_MS);
+    setTimeout(tick, interval);
     return;
   }
 
   if (scraperState.isRunning(SLUG)) {
     console.log('[chinaliveSyncJob] Skipped — already running');
-    setTimeout(tick, SCHEDULE_SYNC_INTERVAL_MS);
+    setTimeout(tick, interval);
     return;
   }
 
@@ -228,7 +229,7 @@ const tick = async () => {
     console.error('[chinaliveSyncJob] scheduleUpcoming failed:', err.message);
   }
 
-  setTimeout(tick, SCHEDULE_SYNC_INTERVAL_MS);
+  setTimeout(tick, interval);
 };
 
 tick();

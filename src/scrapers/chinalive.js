@@ -91,28 +91,47 @@ const absoluteLogo = (url) => {
   return url.startsWith('http') ? url : `${STA_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
 };
 
+// ─── In-memory cache for schedule + rooms (reused by on-demand scrapes) ───────
+// Avoids re-fetching from China CDN on every runForMatch() call (e.g. 5 users
+// clicking different matches at once each trigger a separate fetch otherwise).
+const _cache = {
+  schedule: { data: null, at: 0 },
+  rooms:    { data: null, at: 0 },
+};
+const SCHEDULE_TTL_MS = 3 * 60 * 1000;  // 3 min — schedule rarely changes mid-match
+const ROOMS_TTL_MS    = 90 * 1000;      // 90 s  — live room list changes frequently
+
 // ─── Fetch schedule (primary source for match + logo data) ───────────────────
 
 const fetchScheduleMatches = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
+  const now = Date.now();
+  if (_cache.schedule.data && now - _cache.schedule.at < SCHEDULE_TTL_MS) {
+    return _cache.schedule.data;
+  }
   // Use Beijing time (UTC+8) — schedule files are organized by Chinese date, not UTC
-  const date = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
-  const url  = `${baseApi}/match/matches_${date}.json?v=${Date.now()}`;
+  const date = new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+  const url  = `${baseApi}/match/matches_${date}.json?v=${now}`;
   try {
     const text = await get(url, referer);
     const json = parseJsonp(text);
     const matches = json.data || [];
     console.log(`[chinalive] Schedule loaded: ${matches.length} matches`);
+    _cache.schedule = { data: matches, at: now };
     return matches;
   } catch (err) {
     console.warn(`[chinalive] Schedule fetch failed: ${err.message}`);
-    return [];
+    return _cache.schedule.data || [];
   }
 };
 
 // ─── Fetch live rooms → returns Map<roomNum, room> ────────────────────────────
 
 const fetchRooms = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
-  const url = `${baseApi}/all_live_rooms.json?v=${Date.now()}`;
+  const now = Date.now();
+  if (_cache.rooms.data && now - _cache.rooms.at < ROOMS_TTL_MS) {
+    return _cache.rooms.data;
+  }
+  const url = `${baseApi}/all_live_rooms.json?v=${now}`;
   const text = await get(url, referer);
   const json = parseJsonp(text);
   if (json.code !== 200) throw new Error(`API error: ${json.msg}`);
@@ -124,7 +143,9 @@ const fetchRooms = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEF
   const live = rooms.filter((r) => r.liveStatus === 1);
   // allRooms includes non-live rooms so we can pre-fetch streams for upcoming matches
   const allRooms = new Map(rooms.map((r) => [String(r.roomNum), r]));
-  return { liveMap: new Map(live.map((r) => [String(r.roomNum), r])), allRooms };
+  const result = { liveMap: new Map(live.map((r) => [String(r.roomNum), r])), allRooms };
+  _cache.rooms = { data: result, at: now };
+  return result;
 };
 
 // ─── Fetch stream URLs for one room ──────────────────────────────────────────

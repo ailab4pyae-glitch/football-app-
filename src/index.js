@@ -49,7 +49,7 @@ fastify.register(require('./routes/streams'));
 fastify.register(require('./routes/admin'));
 fastify.register(require('./routes/english'));
 fastify.register(require('./routes/servers'));
-fastify.register(require('./routes/proxy'));
+fastify.register(require('./routes/proxy/index'));
 fastify.register(require('./routes/tv'));
 fastify.register(require('./routes/subscription'));
 fastify.register(require('./routes/auth').routes);
