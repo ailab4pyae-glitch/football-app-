@@ -103,25 +103,43 @@ const ROOMS_TTL_MS    = 90 * 1000;      // 90 s  — live room list changes freq
 
 // ─── Fetch schedule (primary source for match + logo data) ───────────────────
 
+const beijingDateStr = (offsetDays = 0) => {
+  const ms = Date.now() + (8 * 60 * 60 * 1000) + (offsetDays * 24 * 60 * 60 * 1000);
+  return new Date(ms).toISOString().slice(0, 10).replace(/-/g, '');
+};
+
 const fetchScheduleMatches = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
   const now = Date.now();
   if (_cache.schedule.data && now - _cache.schedule.at < SCHEDULE_TTL_MS) {
     return _cache.schedule.data;
   }
-  // Use Beijing time (UTC+8) — schedule files are organized by Chinese date, not UTC
-  const date = new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
-  const url  = `${baseApi}/match/matches_${date}.json?v=${now}`;
-  try {
-    const text = await get(url, referer);
-    const json = parseJsonp(text);
-    const matches = json.data || [];
-    console.log(`[chinalive] Schedule loaded: ${matches.length} matches`);
-    _cache.schedule = { data: matches, at: now };
-    return matches;
-  } catch (err) {
-    console.warn(`[chinalive] Schedule fetch failed: ${err.message}`);
-    return _cache.schedule.data || [];
+
+  // Fetch today + tomorrow (Beijing time) so upcoming matches appear in the schedule tab
+  const dates = [beijingDateStr(0), beijingDateStr(1)];
+  const allMatches = [];
+
+  for (const date of dates) {
+    const url = `${baseApi}/match/matches_${date}.json?v=${now}`;
+    try {
+      const text = await get(url, referer);
+      const json = parseJsonp(text);
+      allMatches.push(...(json.data || []));
+    } catch (err) {
+      console.warn(`[chinalive] Schedule fetch failed for ${date}: ${err.message}`);
+    }
   }
+
+  // De-duplicate by scheduleId (today/tomorrow files may overlap near midnight)
+  const seen = new Set();
+  const matches = allMatches.filter((m) => {
+    if (seen.has(m.scheduleId)) return false;
+    seen.add(m.scheduleId);
+    return true;
+  });
+
+  console.log(`[chinalive] Schedule loaded: ${matches.length} matches (today+tomorrow)`);
+  _cache.schedule = { data: matches, at: now };
+  return matches;
 };
 
 // ─── Fetch live rooms → returns Map<roomNum, room> ────────────────────────────
