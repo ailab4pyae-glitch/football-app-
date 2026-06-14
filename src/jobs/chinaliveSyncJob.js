@@ -9,11 +9,11 @@ const SLUG     = 'chinalive';
 const TAB_SLUG = 'china-live';
 
 // How long before kickoff to pre-warm stream URLs (ms)
-const PREWARM_BEFORE_MS = 25 * 60 * 1000;  // 25 minutes
+const PREWARM_BEFORE_MS = 5 * 60 * 1000;  // 5 minutes
 
 // How often to re-warm URLs while a match is live (ms)
-// CDN auth_key tokens expire in ~10-15 min — re-warm at 7 min to finish before 10 min cache expires
-const REWARM_INTERVAL_MS = 7 * 60 * 1000; // 7 minutes
+// CDN auth_key tokens expire in ~10-15 min — re-warm at 5 min to stay well ahead of expiry
+const REWARM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // How often to sync today's schedule (ms)
 const SCHEDULE_SYNC_INTERVAL_MS = parseInt(process.env.CHINA_SCHEDULE_SYNC_MS, 10) || 6 * 60 * 60 * 1000; // 6 hours
@@ -89,9 +89,9 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
   } catch (_) {}
 };
 
-// ─── Re-warm: refresh stream URLs every 15 min while match is live ───────────
+// ─── Re-warm: refresh stream URLs every 7 min while match is live ────────────
 
-const scheduleRewarm = (dbMatchId, matchLabel) => {
+const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS) => {
   // Cancel any existing re-warm for this match first
   if (rewarmTimers.has(dbMatchId)) {
     clearTimeout(rewarmTimers.get(dbMatchId));
@@ -114,26 +114,58 @@ const scheduleRewarm = (dbMatchId, matchLabel) => {
     } catch (_) {}
 
     console.log(`[chinaPrewarm] Re-warming ${matchLabel}…`);
+    let succeeded = false;
     try {
       const ok = await runForMatch(dbMatchId, { fast: false });
       if (ok) {
         await warmMatchCache(dbMatchId);
-        invalidateMatchStreams(dbMatchId); // bust proxy streamCache so fresh tokens are used immediately
+        invalidateMatchStreams(dbMatchId);
         console.log(`[chinaPrewarm] Re-warm done — ${matchLabel}`);
+        succeeded = true;
       } else {
-        console.warn(`[chinaPrewarm] Re-warm returned false — ${matchLabel}, will retry`);
+        console.warn(`[chinaPrewarm] Re-warm returned false — ${matchLabel}`);
       }
     } catch (err) {
       console.error(`[chinaPrewarm] Re-warm error ${matchLabel}:`, err.message);
     }
-    // Always reschedule — even on failure/false, keep trying until match finishes
-    scheduleRewarm(dbMatchId, matchLabel);
-  }, REWARM_INTERVAL_MS);
+    // Success → normal 7-min interval. Failure → retry in 2 min so tokens don't expire.
+    scheduleRewarm(dbMatchId, matchLabel, succeeded ? REWARM_INTERVAL_MS : PREWARM_RETRY_MS);
+  }, delayMs);
 
   rewarmTimers.set(dbMatchId, handle);
 };
 
 // ─── Pre-warm: fetch stream URLs before kickoff ───────────────────────────────
+
+// Runs the actual scrape with up to MAX_PREWARM_ATTEMPTS retries (2 min apart).
+// Always starts the re-warm chain after the first success so tokens stay fresh.
+const MAX_PREWARM_ATTEMPTS = 3;
+const PREWARM_RETRY_MS     = 2 * 60 * 1000; // 2 min between retries
+
+const runPrewarm = async (dbMatchId, matchLabel, attempt = 1) => {
+  console.log(`[chinaPrewarm] Pre-warming ${matchLabel} (attempt ${attempt}/${MAX_PREWARM_ATTEMPTS})…`);
+  try {
+    const ok = await runForMatch(dbMatchId, { fast: false });
+    if (ok) {
+      await warmMatchCache(dbMatchId);
+      invalidateMatchStreams(dbMatchId);
+      console.log(`[chinaPrewarm] Pre-warm done — ${matchLabel}`);
+      scheduleRewarm(dbMatchId, matchLabel); // always start re-warm chain on success
+      return true;
+    }
+    console.warn(`[chinaPrewarm] Pre-warm returned false — ${matchLabel}`);
+  } catch (err) {
+    console.error(`[chinaPrewarm] Pre-warm error ${matchLabel}:`, err.message);
+  }
+
+  if (attempt < MAX_PREWARM_ATTEMPTS) {
+    console.log(`[chinaPrewarm] Retrying in 2 min — ${matchLabel} (attempt ${attempt + 1})`);
+    setTimeout(() => runPrewarm(dbMatchId, matchLabel, attempt + 1), PREWARM_RETRY_MS);
+  } else {
+    console.error(`[chinaPrewarm] Pre-warm failed after ${MAX_PREWARM_ATTEMPTS} attempts — ${matchLabel}`);
+  }
+  return false;
+};
 
 const schedulePrewarm = (dbMatchId, matchTime, matchLabel) => {
   if (scheduledPrewarms.has(dbMatchId)) return; // already scheduled
@@ -144,33 +176,12 @@ const schedulePrewarm = (dbMatchId, matchTime, matchLabel) => {
   if (delay < 0) {
     // kickoff already passed or within pre-warm window — run immediately
     console.log(`[chinaPrewarm] Pre-warming now (past window) — ${matchLabel}`);
-    runForMatch(dbMatchId, { fast: false })
-      .then(async (ok) => {
-        if (ok) {
-          await warmMatchCache(dbMatchId);
-          invalidateMatchStreams(dbMatchId);
-          scheduleRewarm(dbMatchId, matchLabel);
-        }
-      })
-      .catch((err) => console.error(`[chinaPrewarm] Pre-warm error ${matchLabel}:`, err.message));
+    runPrewarm(dbMatchId, matchLabel);
     return;
   }
 
   console.log(`[chinaPrewarm] Pre-warm scheduled in ${Math.round(delay / 60000)} min — ${matchLabel}`);
-  setTimeout(async () => {
-    console.log(`[chinaPrewarm] Pre-warming ${matchLabel}…`);
-    try {
-      const ok = await runForMatch(dbMatchId, { fast: false });
-      if (ok) {
-        await warmMatchCache(dbMatchId);
-        invalidateMatchStreams(dbMatchId);
-        console.log(`[chinaPrewarm] Pre-warm done — ${matchLabel}`);
-        scheduleRewarm(dbMatchId, matchLabel);
-      }
-    } catch (err) {
-      console.error(`[chinaPrewarm] Pre-warm error ${matchLabel}:`, err.message);
-    }
-  }, delay);
+  setTimeout(() => runPrewarm(dbMatchId, matchLabel), delay);
 };
 
 // ─── Load upcoming matches from DB and schedule pre-warm timers ──────────────

@@ -31,19 +31,23 @@ const buildGrouped = (rows, apiBase) => {
 };
 
 const queryStreams = async (matchId) => {
-  const { rows } = await db.query(
-    `SELECT id, url, quality, source_name, priority, is_healthy, last_checked, expires_at, latency_ms
-     FROM stream_urls
-     WHERE match_id = $1
-       AND is_healthy = true
-       AND (expires_at IS NULL OR expires_at > NOW())
-     ORDER BY
-       CASE quality WHEN 'HD' THEN 1 WHEN 'SD' THEN 2 ELSE 3 END ASC,
-       priority DESC,
-       latency_ms ASC NULLS LAST`,
-    [matchId]
-  );
-  return rows;
+  try {
+    const { rows } = await db.query(
+      `SELECT id, url, quality, source_name, priority, is_healthy, last_checked, expires_at, latency_ms
+       FROM stream_urls
+       WHERE match_id = $1
+         AND is_healthy = true
+         AND (expires_at IS NULL OR expires_at > NOW())
+       ORDER BY
+         CASE quality WHEN 'HD' THEN 1 WHEN 'SD' THEN 2 ELSE 3 END ASC,
+         priority DESC,
+         latency_ms ASC NULLS LAST`,
+      [matchId]
+    );
+    return rows;
+  } catch (_) {
+    return [];
+  }
 };
 
 module.exports = async function (fastify, opts) {
@@ -67,11 +71,14 @@ module.exports = async function (fastify, opts) {
     } catch (_) {}
 
     // ── 2. Check if this is a china-live match ────────────────────────────────
-    const matchRow = await db.query(
-      "SELECT source_name FROM matches WHERE id = $1 LIMIT 1",
-      [matchId]
-    );
-    const isChina = matchRow.rows[0]?.source_name === 'chinalive';
+    let isChina = false;
+    try {
+      const matchRow = await db.query(
+        "SELECT source_name FROM matches WHERE id = $1 LIMIT 1",
+        [matchId]
+      );
+      isChina = matchRow.rows[0]?.source_name === 'chinalive';
+    } catch (_) {}
 
     if (isChina) {
       // ── 3a. Check DB first — pre-warm may have already saved fresh URLs ──────
