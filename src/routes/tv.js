@@ -102,22 +102,35 @@ module.exports = async function (fastify) {
 
     if (!name) { reply.code(400); return { error: 'name is required' }; }
 
-    const autoSlug = slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const baseSlug = slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-    const { rows } = await db.query(
-      `INSERT INTO tv_channels
-         (name, slug, type, category, emoji, color, logo_url, stream_url,
-          is_active, position, country, language)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       RETURNING *`,
-      [name, autoSlug, type, category, emoji, color,
-       logo_url || null, stream_url || null, is_active, position,
-       country || 'Myanmar', language || 'Burmese']
-    );
+    // Find a unique slug by appending -2, -3, etc. if taken
+    let uniqueSlug = baseSlug;
+    let suffix = 2;
+    while (true) {
+      const exists = await db.query('SELECT 1 FROM tv_channels WHERE slug = $1 LIMIT 1', [uniqueSlug]);
+      if (!exists.rows.length) break;
+      uniqueSlug = `${baseSlug}-${suffix++}`;
+    }
 
-    await bustCache();
-    reply.code(201);
-    return rows[0];
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO tv_channels
+           (name, slug, type, category, emoji, color, logo_url, stream_url,
+            is_active, position, country, language)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING *`,
+        [name, uniqueSlug, type, category, emoji, color,
+         logo_url || null, stream_url || null, is_active, position,
+         country || 'Myanmar', language || 'Burmese']
+      );
+      await bustCache();
+      reply.code(201);
+      return rows[0];
+    } catch (err) {
+      reply.code(500);
+      return { error: 'Failed to create channel' };
+    }
   });
 
   fastify.put('/api/admin/tv/:id', async (request, reply) => {

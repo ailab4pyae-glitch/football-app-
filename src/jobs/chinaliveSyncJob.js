@@ -11,13 +11,14 @@ const TAB_SLUG = 'china-live';
 const PREWARM_BEFORE_MS = 25 * 60 * 1000;  // 25 minutes
 
 // How often to re-warm URLs while a match is live (ms)
-const REWARM_INTERVAL_MS = 12 * 60 * 1000; // 12 minutes
+// CDN auth_key tokens expire in ~10-15 min — re-warm at 7 min to finish before 10 min cache expires
+const REWARM_INTERVAL_MS = 7 * 60 * 1000; // 7 minutes
 
 // How often to sync today's schedule (ms)
 const SCHEDULE_SYNC_INTERVAL_MS = parseInt(process.env.CHINA_SCHEDULE_SYNC_MS, 10) || 6 * 60 * 60 * 1000; // 6 hours
 
-// Redis stream cache TTL — must be < token lifetime (30-50 min) and >= re-warm interval
-const STREAM_CACHE_TTL_SEC = 16 * 60; // 16 min (slightly more than 15 min re-warm)
+// Redis stream cache TTL — keep well above re-warm interval to cover scrape time
+const STREAM_CACHE_TTL_SEC = 14 * 60; // 14 min (re-warm at 7min + ~2min scrape + buffer)
 
 // In-memory set of match IDs that already have timers scheduled this process lifetime
 const scheduledPrewarms = new Set();
@@ -117,12 +118,14 @@ const scheduleRewarm = (dbMatchId, matchLabel) => {
       if (ok) {
         await warmMatchCache(dbMatchId);
         console.log(`[chinaPrewarm] Re-warm done — ${matchLabel}`);
-        scheduleRewarm(dbMatchId, matchLabel);
+      } else {
+        console.warn(`[chinaPrewarm] Re-warm returned false — ${matchLabel}, will retry`);
       }
     } catch (err) {
       console.error(`[chinaPrewarm] Re-warm error ${matchLabel}:`, err.message);
-      scheduleRewarm(dbMatchId, matchLabel);
     }
+    // Always reschedule — even on failure/false, keep trying until match finishes
+    scheduleRewarm(dbMatchId, matchLabel);
   }, REWARM_INTERVAL_MS);
 
   rewarmTimers.set(dbMatchId, handle);
