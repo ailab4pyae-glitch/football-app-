@@ -8,9 +8,37 @@
 const https = require('https');
 const http  = require('http');
 const db    = require('../../config/database');
-const { STREAM_UA, getStreamRecord, invalidateStream, invalidateMatchCache, getM3u8Cached } = require('./shared');
+const { STREAM_UA, getStreamRecord, invalidateStream, invalidateMatchCache, invalidateMatchStreams, getM3u8Cached } = require('./shared');
 const china = require('./china');
 const soco  = require('./soco');
+
+// Debounced re-scrape: when any China stream fails, immediately fire a background
+// re-scrape for that match so fresh tokens are ready before the player exhausts
+// all servers. One scrape per match at a time — Set prevents concurrent duplicates.
+const pendingScrapes = new Set();
+const triggerRescrape = (matchId) => {
+  if (!matchId || pendingScrapes.has(matchId)) return;
+  pendingScrapes.add(matchId);
+  setImmediate(async () => {
+    try {
+      const { runForMatch } = require('../../scrapers/chinalive');
+      const redis = require('../../config/redis');
+      console.log(`[CHINA-RESCRAPE] Triggering background re-scrape for match=${matchId}`);
+      const ok = await runForMatch(matchId, { fast: true });
+      if (ok) {
+        await redis.del(`streams:${matchId}`).catch(() => {});
+        invalidateMatchStreams(matchId);
+        console.log(`[CHINA-RESCRAPE] Done match=${matchId} — Redis cleared, fresh tokens in DB`);
+      } else {
+        console.warn(`[CHINA-RESCRAPE] No live rooms found for match=${matchId}`);
+      }
+    } catch (err) {
+      console.error(`[CHINA-RESCRAPE] Error match=${matchId}:`, err.message);
+    } finally {
+      pendingScrapes.delete(matchId);
+    }
+  });
+};
 
 const REFERER_BY_SOURCE = {
   chinalive: 'https://yyzbw8.live/',
@@ -61,15 +89,15 @@ module.exports = async (fastify) => {
     const markUnhealthy = () => {
       if (source_name === 'chinalive') {
         console.warn(`[CHINA-FAIL] CDN error on stream ${id} match=${record.match_id} url=${cdnUrl.slice(0, 90)}`);
-        // Mark stream unhealthy in DB so the on-demand scrape fires on the next /api/streams
-        // call (queryStreams returns 0 rows → triggers re-scrape → fresh tokens).
         db.query(
           'UPDATE stream_urls SET is_healthy = false, expires_at = NOW() WHERE id = $1',
           [id]
         ).catch(() => {});
-        // Bust Redis + in-memory so the next /api/streams call rebuilds from DB
         invalidateMatchCache(id, record.match_id);
         console.warn(`[CHINA-FAIL] Redis + in-memory cache busted for match=${record.match_id}`);
+        // Fire background re-scrape immediately — by the time the player exhausts
+        // all servers (30s), fresh tokens will already be in DB and Redis.
+        triggerRescrape(record.match_id);
         return;
       }
       invalidateStream(id);
