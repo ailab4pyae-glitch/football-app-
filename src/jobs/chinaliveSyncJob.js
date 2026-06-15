@@ -9,17 +9,17 @@ const SLUG     = 'chinalive';
 const TAB_SLUG = 'china-live';
 
 // How long before kickoff to pre-warm stream URLs (ms)
-const PREWARM_BEFORE_MS = 5 * 60 * 1000;  // 5 minutes
+const PREWARM_BEFORE_MS = 10 * 60 * 1000; // 10 minutes — gives more buffer before kickoff
 
 // How often to re-warm URLs while a match is live (ms)
-// CDN auth_key tokens expire in ~10-15 min — re-warm at 5 min to stay well ahead of expiry
-const REWARM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+// CDN auth_key tokens expire in ~10-15 min — re-warm every 2 min to stay well ahead
+const REWARM_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 
 // How often to sync today's schedule (ms)
 const SCHEDULE_SYNC_INTERVAL_MS = parseInt(process.env.CHINA_SCHEDULE_SYNC_MS, 10) || 6 * 60 * 60 * 1000; // 6 hours
 
-// Redis stream cache TTL — keep well above re-warm interval to cover scrape time
-const STREAM_CACHE_TTL_SEC = 14 * 60; // 14 min — re-warm every 5 min, so cache is always refreshed well before expiry
+// Redis stream cache TTL — keep above re-warm interval to cover scrape time
+const STREAM_CACHE_TTL_SEC = 5 * 60; // 5 min — re-warm every 2 min, cache refreshed well before expiry
 
 // In-memory set of match IDs that already have timers scheduled this process lifetime
 const scheduledPrewarms = new Set();
@@ -58,6 +58,16 @@ const invalidateMatchCache = async (dbMatchId) => {
 // very first user request is a cache HIT (< 1ms) instead of a DB round-trip.
 const warmMatchCache = async (dbMatchId, apiBase) => {
   try {
+    const base = apiBase || process.env.BACKEND_URL;
+
+    if (!base) {
+      // BACKEND_URL not set — deleting stale cache so the next browser request
+      // rebuilds proxy URLs using the correct HTTPS protocol from request headers.
+      // Writing localhost URLs here would break mobile (mixed-content block).
+      await redis.del(`streams:${dbMatchId}`).catch(() => {});
+      return;
+    }
+
     const { rows } = await db.query(
       `SELECT id, url, quality, source_name, priority, is_healthy, last_checked, expires_at, latency_ms
        FROM stream_urls
@@ -70,8 +80,6 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
       [dbMatchId]
     );
     if (!rows.length) return;
-
-    const base    = apiBase || process.env.BACKEND_URL || 'http://localhost:3050';
     const direct  = process.env.DIRECT_STREAMS === 'true';
     const grouped = { SD: [], HD: [] };
     for (const row of rows) {
@@ -182,6 +190,19 @@ const schedulePrewarm = (dbMatchId, matchTime, matchLabel) => {
 
   console.log(`[chinaPrewarm] Pre-warm scheduled in ${Math.round(delay / 60000)} min — ${matchLabel}`);
   setTimeout(() => runPrewarm(dbMatchId, matchLabel), delay);
+
+  // Kickoff re-warm: fire at exact match time to pick up real match streams.
+  // China platforms switch to different broadcast rooms at kickoff — pre-match
+  // rooms go offline, so pre-warm streams become invalid the moment the match starts.
+  // This re-warm fires right at T=0 and restarts the 5-min refresh chain from kickoff.
+  const kickoffDelay = matchTime - Date.now();
+  if (kickoffDelay > 0 && kickoffDelay < 120 * 60 * 1000) {
+    console.log(`[chinaPrewarm] Kickoff re-warm scheduled in ${Math.round(kickoffDelay / 60000)} min — ${matchLabel}`);
+    setTimeout(() => {
+      console.log(`[chinaPrewarm] Kickoff re-warm firing — ${matchLabel}`);
+      scheduleRewarm(dbMatchId, matchLabel, 0); // cancels any pending re-warm, fires immediately
+    }, kickoffDelay);
+  }
 };
 
 // ─── Load upcoming matches from DB and schedule pre-warm timers ──────────────

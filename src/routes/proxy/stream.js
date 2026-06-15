@@ -8,7 +8,7 @@
 const https = require('https');
 const http  = require('http');
 const db    = require('../../config/database');
-const { STREAM_UA, getStreamRecord, invalidateStream, getM3u8Cached } = require('./shared');
+const { STREAM_UA, getStreamRecord, invalidateStream, invalidateMatchCache, getM3u8Cached } = require('./shared');
 const china = require('./china');
 const soco  = require('./soco');
 
@@ -59,11 +59,14 @@ module.exports = async (fastify) => {
     const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
 
     const markUnhealthy = () => {
+      if (source_name === 'chinalive') {
+        // Bust both in-memory and Redis caches so the next /api/streams request re-queries
+        // DB and triggers on-demand re-scrape. Without this, Redis holds broken proxy URLs
+        // for 14 min and users keep hitting "server fail" on every reopen (the "3 2 1" loop).
+        invalidateMatchCache(id, record.match_id);
+        return;
+      }
       invalidateStream(id);
-      // China live token lifecycle is owned by the re-warm cycle — marking is_healthy=false
-      // here would race against re-warm and hide a stream that already has a fresh token.
-      // expireOldUrls() handles actual expiry; re-warm handles renewal.
-      if (source_name === 'chinalive') return;
       return db.query('UPDATE stream_urls SET is_healthy = false, expires_at = NOW() WHERE id = $1', [id]).catch(() => {});
     };
 

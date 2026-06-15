@@ -105,8 +105,9 @@ PUT  /api/admin/scrapers/:slug/schedule   — update (merges into config, leaves
 **China Live special logic** (`chinaliveSyncJob.js`):
 - Schedule sync: every 6 hours (syncs today's match list from the API)
 - Pre-warm: 10 min before kickoff → scrapes stream URLs and writes to Redis
-- Re-warm: every 15 min while match is `live` → refreshes expiring CDN tokens
-- Redis stream cache TTL: 16 min (`streams:{matchId}`)
+- Kickoff re-warm: fires at exact match time to pick up real match streams
+- Re-warm: every 2 min while match is `live` → refreshes expiring CDN tokens
+- Redis stream cache TTL: 5 min (`streams:{matchId}`)
 
 ---
 
@@ -116,7 +117,7 @@ PUT  /api/admin/scrapers/:slug/schedule   — update (merges into config, leaves
 User requests /api/streams/:matchId
   → check Redis key  streams:{matchId}
   → if HIT: return cached grouped { SD: [...], HD: [...] }
-  → if MISS: query DB stream_urls, build grouped, cache 16 min
+  → if MISS: query DB stream_urls, build grouped, cache 5 min
   → if no streams exist: trigger on-demand scrape (chinalive only), wait up to 15s
   → URLs are proxied: m3u8 → /api/proxy/stream/:id, FLV → /api/proxy/flv/:id
 ```

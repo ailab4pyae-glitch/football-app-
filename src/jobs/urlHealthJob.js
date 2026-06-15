@@ -1,6 +1,8 @@
-const db = require('../config/database');
+const db    = require('../config/database');
+const redis = require('../config/redis');
 const { run: rerunSoco }  = require('../scrapers/socolive');
 const { run: rerunChina } = require('../scrapers/chinalive');
+const { invalidateMatchStreams } = require('../routes/proxy/shared');
 
 const DEFAULT_INTERVAL_MS  = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 5 * 60 * 1000;
 const DEFAULT_failThreshold = parseInt(process.env.HEALTH_failThreshold, 10)  || 10;
@@ -184,12 +186,22 @@ const runHealthCheck = async (failThreshold) => {
 };
 
 const expireOldUrls = async () => {
-  const { rowCount } = await db.query(
+  const { rows, rowCount } = await db.query(
     `UPDATE stream_urls
      SET is_healthy = false
-     WHERE expires_at IS NOT NULL AND expires_at < NOW() AND is_healthy = true`
+     WHERE expires_at IS NOT NULL AND expires_at < NOW() AND is_healthy = true
+     RETURNING match_id, id`
   );
-  if (rowCount > 0) console.log(`[urlHealthJob] Expired ${rowCount} stream URL(s)`);
+  if (rowCount === 0) return;
+  console.log(`[urlHealthJob] Expired ${rowCount} stream URL(s)`);
+
+  // Bust Redis stream cache + in-memory proxy cache for affected matches so users
+  // don't get proxy URLs pointing to expired CDN tokens (which show "server fail").
+  const matchIds = [...new Set(rows.map((r) => r.match_id))];
+  for (const matchId of matchIds) {
+    await redis.del(`streams:${matchId}`).catch(() => {});
+    invalidateMatchStreams(matchId);
+  }
 };
 
 // Match lifecycle (scheduled → live → finished) is owned by finishedMatchCleanupJob.

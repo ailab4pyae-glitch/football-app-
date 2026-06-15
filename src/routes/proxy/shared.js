@@ -1,4 +1,5 @@
-const db = require('../../config/database');
+const db    = require('../../config/database');
+const redis = require('../../config/redis');
 
 const STREAM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
 
@@ -15,11 +16,18 @@ const getStreamRecord = async (id) => {
   const cached = streamCache.get(id);
   if (cached && cached.validUntil > now) return cached;
 
+  // Check is_healthy AND expires_at — an expired/unhealthy stream must return null
+  // so the proxy returns 404 instead of trying a dead CDN URL (which shows "server fail").
   const { rows } = await db.query(
-    'SELECT url, source_name, match_id, expires_at FROM stream_urls WHERE id = $1 LIMIT 1',
+    `SELECT url, source_name, match_id, expires_at FROM stream_urls
+     WHERE id = $1 AND is_healthy = true AND (expires_at IS NULL OR expires_at > NOW())
+     LIMIT 1`,
     [id]
   );
-  if (!rows.length) return null;
+  if (!rows.length) {
+    streamCache.delete(id); // ensure no stale in-memory entry
+    return null;
+  }
 
   const row        = rows[0];
   const expiresMs  = row.expires_at ? new Date(row.expires_at).getTime() : now + 10 * 60 * 1000;
@@ -39,6 +47,17 @@ const invalidateMatchStreams = (matchId) => {
   }
 };
 
+// When CDN fails for a chinalive stream, bust both the in-memory proxy cache and
+// the Redis streams cache for that match. Without this, Redis holds broken proxy
+// URLs for up to 14 min — every reopen gets the same dead servers ("3 2 1 fail").
+const invalidateMatchCache = (streamId, matchId) => {
+  invalidateStream(streamId);
+  if (matchId) {
+    invalidateMatchStreams(matchId);
+    redis.del(`streams:${matchId}`).catch(() => {});
+  }
+};
+
 // ─── m3u8 playlist response cache ────────────────────────────────────────────
 // HLS players re-fetch the playlist every 2-5 s. Without caching every viewer
 // causes a separate server→CDN round-trip. A 4-second cache means N concurrent
@@ -55,4 +74,4 @@ const getM3u8Cached = async (cdnUrl, fetcher) => {
   return body;
 };
 
-module.exports = { STREAM_UA, PRIVATE_IP_RE, getStreamRecord, invalidateStream, invalidateMatchStreams, getM3u8Cached };
+module.exports = { STREAM_UA, PRIVATE_IP_RE, getStreamRecord, invalidateStream, invalidateMatchStreams, invalidateMatchCache, getM3u8Cached };

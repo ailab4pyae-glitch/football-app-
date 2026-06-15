@@ -111,14 +111,15 @@ const syncEmbeds = async (dbMatchId, srcMatchId) => {
 
   let saved = 0;
   for (let i = 0; i < streamList.length; i++) {
-    const s   = streamList[i];
-    const url = s.url || s.embed || s.link || null;
+    const s    = streamList[i];
+    const url  = s.url || s.embed || s.link || null;
     if (!url) continue;
+    const name = s.name || s.title || s.label || s.channel || 'sportsrc';
     try {
       await db.query(
         `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, created_at)
-         VALUES ($1, $2, 'EMBED', 'sportsrc', $3, true, now())`,
-        [dbMatchId, url, streamList.length - i]
+         VALUES ($1, $2, 'EMBED', $3, $4, true, now())`,
+        [dbMatchId, url, name, streamList.length - i]
       );
       saved++;
     } catch (err) {
@@ -168,6 +169,7 @@ const syncSportsrc = async () => {
 
     for (const league of (data.data || [])) {
       const leagueName = league.league?.name || '';
+      if (!leagueName.toLowerCase().includes('world cup')) continue;
       for (const match of (league.matches || [])) {
         if (match.status === 'finished') continue;
 

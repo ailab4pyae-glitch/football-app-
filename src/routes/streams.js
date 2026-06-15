@@ -137,14 +137,16 @@ module.exports = async function (fastify, opts) {
           const detail     = await getDetail(srcMatchId);
           const streamList = detail?.data?.streams || detail?.streams || [];
           if (streamList.length) {
-            await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND source_name = $2', [matchId, 'sportsrc']).catch(() => {});
+            await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND quality = $2', [matchId, 'EMBED']).catch(() => {});
             for (let i = 0; i < streamList.length; i++) {
-              const url = streamList[i].url || streamList[i].embed || null;
+              const s   = streamList[i];
+              const url = s.url || s.embed || s.link || null;
               if (!url) continue;
+              const name = s.name || s.title || s.label || s.channel || 'sportsrc';
               await db.query(
                 `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, created_at)
-                 VALUES ($1, $2, 'EMBED', 'sportsrc', $3, true, now())`,
-                [matchId, url, streamList.length - i]
+                 VALUES ($1, $2, 'EMBED', $3, $4, true, now())`,
+                [matchId, url, name, streamList.length - i]
               ).catch(() => {});
             }
           }
