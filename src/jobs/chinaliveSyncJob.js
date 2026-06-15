@@ -19,7 +19,7 @@ const REWARM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const SCHEDULE_SYNC_INTERVAL_MS = parseInt(process.env.CHINA_SCHEDULE_SYNC_MS, 10) || 6 * 60 * 60 * 1000; // 6 hours
 
 // Redis stream cache TTL — keep well above re-warm interval to cover scrape time
-const STREAM_CACHE_TTL_SEC = 14 * 60; // 14 min (re-warm at 7min + ~2min scrape + buffer)
+const STREAM_CACHE_TTL_SEC = 14 * 60; // 14 min — re-warm every 5 min, so cache is always refreshed well before expiry
 
 // In-memory set of match IDs that already have timers scheduled this process lifetime
 const scheduledPrewarms = new Set();
