@@ -60,10 +60,16 @@ module.exports = async (fastify) => {
 
     const markUnhealthy = () => {
       if (source_name === 'chinalive') {
-        // Bust both in-memory and Redis caches so the next /api/streams request re-queries
-        // DB and triggers on-demand re-scrape. Without this, Redis holds broken proxy URLs
-        // for 14 min and users keep hitting "server fail" on every reopen (the "3 2 1" loop).
+        console.warn(`[CHINA-FAIL] CDN error on stream ${id} match=${record.match_id} url=${cdnUrl.slice(0, 90)}`);
+        // Mark stream unhealthy in DB so the on-demand scrape fires on the next /api/streams
+        // call (queryStreams returns 0 rows → triggers re-scrape → fresh tokens).
+        db.query(
+          'UPDATE stream_urls SET is_healthy = false, expires_at = NOW() WHERE id = $1',
+          [id]
+        ).catch(() => {});
+        // Bust Redis + in-memory so the next /api/streams call rebuilds from DB
         invalidateMatchCache(id, record.match_id);
+        console.warn(`[CHINA-FAIL] Redis + in-memory cache busted for match=${record.match_id}`);
         return;
       }
       invalidateStream(id);

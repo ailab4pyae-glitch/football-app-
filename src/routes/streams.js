@@ -69,13 +69,7 @@ module.exports = async function (fastify, opts) {
     const lockKey  = `lock:china:${matchId}`;
     const apiBase  = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
 
-    // ── 1. Cache hit → return immediately ────────────────────────────────────
-    try {
-      const cached = await redis.get(cacheKey);
-      if (cached) return JSON.parse(cached);
-    } catch (_) {}
-
-    // ── 2. Check match source ─────────────────────────────────────────────────
+    // ── 1. Check match source ─────────────────────────────────────────────────
     let isChina    = false;
     let isSportsrc = false;
     let srcMatchId = null;
@@ -88,6 +82,27 @@ module.exports = async function (fastify, opts) {
       isChina    = src === 'chinalive';
       isSportsrc = src === 'sportsrc';
       srcMatchId = matchRow.rows[0]?.source_match_id;
+    } catch (_) {}
+
+    // ── 2. Cache hit → return immediately (skip if sportsrc with empty embeds) ─
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (isChina) {
+          const sdCount = parsed.SD?.length || 0;
+          const hdCount = parsed.HD?.length || 0;
+          if (sdCount === 0 && hdCount === 0) {
+            console.warn(`[CHINA-CACHE] Redis HIT but empty for match=${matchId} — falling through to DB`);
+          } else {
+            console.log(`[CHINA-CACHE] Redis HIT match=${matchId} SD=${sdCount} HD=${hdCount}`);
+          }
+        }
+        // For sportsrc: don't return an empty embed cache — fall through to re-fetch
+        if (!isSportsrc || parsed.embed?.length > 0) return parsed;
+      } else if (isChina) {
+        console.log(`[CHINA-CACHE] Redis MISS match=${matchId} — querying DB`);
+      }
     } catch (_) {}
 
     if (isChina) {
@@ -135,14 +150,14 @@ module.exports = async function (fastify, opts) {
         try {
           const { getDetail } = require('../scrapers/sportsrc');
           const detail     = await getDetail(srcMatchId);
-          const streamList = detail?.data?.streams || detail?.streams || [];
+          const streamList = detail?.data?.sources || detail?.data?.streams || detail?.streams || [];
           if (streamList.length) {
             await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND quality = $2', [matchId, 'EMBED']).catch(() => {});
             for (let i = 0; i < streamList.length; i++) {
               const s   = streamList[i];
-              const url = s.url || s.embed || s.link || null;
+              const url = s.embedUrl || s.url || s.embed || s.link || null;
               if (!url) continue;
-              const name = s.name || s.title || s.label || s.channel || 'sportsrc';
+              const name = s.language || s.name || s.title || s.label || s.channel || 'sportsrc';
               await db.query(
                 `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, created_at)
                  VALUES ($1, $2, 'EMBED', $3, $4, true, now())`,
@@ -161,8 +176,13 @@ module.exports = async function (fastify, opts) {
     const grouped = buildGrouped(rows, apiBase);
 
     try {
-      const ttl = isChina ? STREAM_CACHE_TTL_SEC : isSportsrc ? 20 * 60 : 15;
-      await redis.set(cacheKey, JSON.stringify(grouped), 'EX', ttl);
+      const hasContent = grouped.SD.length || grouped.HD.length || grouped.embed.length;
+      // Never cache an empty sportsrc result — pre-match on-demand calls return nothing,
+      // and caching empty for 20 min causes the sync job to skip re-fetch when streams arrive.
+      if (hasContent || !isSportsrc) {
+        const ttl = isChina ? STREAM_CACHE_TTL_SEC : isSportsrc ? 20 * 60 : 15;
+        await redis.set(cacheKey, JSON.stringify(grouped), 'EX', ttl);
+      }
     } catch (_) {}
 
     return grouped;

@@ -61,10 +61,10 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
     const base = apiBase || process.env.BACKEND_URL;
 
     if (!base) {
-      // BACKEND_URL not set — deleting stale cache so the next browser request
-      // rebuilds proxy URLs using the correct HTTPS protocol from request headers.
-      // Writing localhost URLs here would break mobile (mixed-content block).
+      // BACKEND_URL not set — delete stale Redis so the next request rebuilds
+      // proxy URLs using the correct HTTPS protocol from request headers.
       await redis.del(`streams:${dbMatchId}`).catch(() => {});
+      console.log(`[REWARM] Redis cleared (BACKEND_URL not set) match=${dbMatchId}`);
       return;
     }
 
@@ -79,7 +79,12 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
          priority DESC, latency_ms ASC NULLS LAST`,
       [dbMatchId]
     );
-    if (!rows.length) return;
+    if (!rows.length) {
+      // No healthy non-expired streams — bust stale Redis so next request goes to DB
+      await redis.del(`streams:${dbMatchId}`).catch(() => {});
+      console.warn(`[REWARM] No healthy streams in DB for match=${dbMatchId} — Redis cleared`);
+      return;
+    }
     const direct  = process.env.DIRECT_STREAMS === 'true';
     const grouped = { SD: [], HD: [] };
     for (const row of rows) {
@@ -94,7 +99,10 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
                         last_checked: row.last_checked, expires_at: row.expires_at });
     }
     await redis.set(`streams:${dbMatchId}`, JSON.stringify(grouped), 'EX', STREAM_CACHE_TTL_SEC);
-  } catch (_) {}
+    console.log(`[REWARM] Redis warmed match=${dbMatchId} SD=${grouped.SD.length} HD=${grouped.HD.length} TTL=${STREAM_CACHE_TTL_SEC}s`);
+  } catch (err) {
+    console.error(`[REWARM] warmMatchCache error match=${dbMatchId}:`, err.message);
+  }
 };
 
 // ─── Re-warm: refresh stream URLs every 7 min while match is live ────────────
@@ -121,22 +129,36 @@ const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS) => 
       }
     } catch (_) {}
 
-    console.log(`[chinaPrewarm] Re-warming ${matchLabel}…`);
+    console.log(`[REWARM] Starting re-warm — ${matchLabel} match=${dbMatchId}`);
     let succeeded = false;
     try {
       const ok = await runForMatch(dbMatchId, { fast: false });
       if (ok) {
         await warmMatchCache(dbMatchId);
         invalidateMatchStreams(dbMatchId);
-        console.log(`[chinaPrewarm] Re-warm done — ${matchLabel}`);
+        // Log how many healthy streams we now have after re-warm
+        try {
+          const { rows } = await db.query(
+            `SELECT COUNT(*) AS n, MIN(expires_at) AS earliest
+             FROM stream_urls WHERE match_id = $1 AND is_healthy = true`,
+            [dbMatchId]
+          );
+          const n = rows[0]?.n || 0;
+          const earliest = rows[0]?.earliest
+            ? Math.round((new Date(rows[0].earliest) - Date.now()) / 1000) + 's'
+            : 'no expiry';
+          console.log(`[REWARM] Done — ${matchLabel} streams=${n} token_expires_in=${earliest}`);
+        } catch (_) {
+          console.log(`[REWARM] Done — ${matchLabel}`);
+        }
         succeeded = true;
       } else {
-        console.warn(`[chinaPrewarm] Re-warm returned false — ${matchLabel}`);
+        console.warn(`[REWARM] runForMatch returned false (no live rooms?) — ${matchLabel}`);
       }
     } catch (err) {
-      console.error(`[chinaPrewarm] Re-warm error ${matchLabel}:`, err.message);
+      console.error(`[REWARM] Error — ${matchLabel}:`, err.message);
     }
-    // Success → normal 7-min interval. Failure → retry in 2 min so tokens don't expire.
+    // Success → normal 2-min interval. Failure → retry in 2 min.
     scheduleRewarm(dbMatchId, matchLabel, succeeded ? REWARM_INTERVAL_MS : PREWARM_RETRY_MS);
   }, delayMs);
 

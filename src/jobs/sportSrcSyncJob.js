@@ -85,10 +85,13 @@ const upsertMatch = async (tabId, match, leagueName) => {
 // ─── Fetch + save embed stream URLs for a match ───────────────────────────────
 
 const syncEmbeds = async (dbMatchId, srcMatchId) => {
-  // Skip if Redis cache still warm (embed URLs haven't changed)
+  // Skip only if Redis already has actual embed streams cached
   try {
     const cached = await redis.get(`streams:${dbMatchId}`);
-    if (cached) return;
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (parsed.embed?.length > 0) return;
+    }
   } catch (_) {}
 
   let detail;
@@ -99,22 +102,23 @@ const syncEmbeds = async (dbMatchId, srcMatchId) => {
     return;
   }
 
-  // API may nest streams under data or return at root
-  const streamList = detail?.data?.streams || detail?.streams || [];
+  // API returns data.sources (embedUrl field, language for channel name)
+  const streamList = detail?.data?.sources || detail?.data?.streams || detail?.streams || [];
   if (!streamList.length) {
     console.log(`[sportsrc] No embeds yet for ${srcMatchId}`);
     return;
   }
 
-  // Replace stale embed rows
-  await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND source_name = $2', [dbMatchId, 'sportsrc']).catch(() => {});
+  // Replace all embed rows for this match — use quality='EMBED' not source_name='sportsrc'
+  // because saved rows have the actual channel name (e.g. 'English - FOX') as source_name.
+  await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND quality = $2', [dbMatchId, 'EMBED']).catch(() => {});
 
   let saved = 0;
   for (let i = 0; i < streamList.length; i++) {
     const s    = streamList[i];
-    const url  = s.url || s.embed || s.link || null;
+    const url  = s.embedUrl || s.url || s.embed || s.link || null;
     if (!url) continue;
-    const name = s.name || s.title || s.label || s.channel || 'sportsrc';
+    const name = s.language || s.name || s.title || s.label || s.channel || 'sportsrc';
     try {
       await db.query(
         `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, created_at)

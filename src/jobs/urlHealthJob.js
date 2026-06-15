@@ -187,20 +187,28 @@ const runHealthCheck = async (failThreshold) => {
 
 const expireOldUrls = async () => {
   const { rows, rowCount } = await db.query(
-    `UPDATE stream_urls
+    `UPDATE stream_urls su
      SET is_healthy = false
-     WHERE expires_at IS NOT NULL AND expires_at < NOW() AND is_healthy = true
-     RETURNING match_id, id`
+     FROM matches m
+     WHERE su.match_id = m.id
+       AND su.expires_at IS NOT NULL AND su.expires_at < NOW() AND su.is_healthy = true
+     RETURNING su.match_id, su.id, m.title, m.source_name, su.expires_at`
   );
   if (rowCount === 0) return;
-  console.log(`[urlHealthJob] Expired ${rowCount} stream URL(s)`);
 
-  // Bust Redis stream cache + in-memory proxy cache for affected matches so users
-  // don't get proxy URLs pointing to expired CDN tokens (which show "server fail").
+  for (const r of rows) {
+    const secAgo = Math.round((Date.now() - new Date(r.expires_at).getTime()) / 1000);
+    console.warn(`[EXPIRE] ${r.source_name} stream ${r.id} expired ${secAgo}s ago — match "${r.title}" (${r.match_id})`);
+  }
+  console.log(`[EXPIRE] Marked ${rowCount} stream(s) unhealthy — busting Redis + in-memory cache`);
+
+  // Bust Redis stream cache + in-memory proxy cache so users don't get proxy URLs
+  // pointing to expired CDN tokens (the "3 2 1 server fail" loop on reopen).
   const matchIds = [...new Set(rows.map((r) => r.match_id))];
   for (const matchId of matchIds) {
     await redis.del(`streams:${matchId}`).catch(() => {});
     invalidateMatchStreams(matchId);
+    console.log(`[EXPIRE] Cache busted for match=${matchId}`);
   }
 };
 
