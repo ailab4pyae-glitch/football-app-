@@ -8,8 +8,13 @@ const LOCK_POLL_MS    = 500;
 const LOCK_TTL_SEC    = 30;
 
 const buildGrouped = (rows, apiBase) => {
-  const grouped = { SD: [], HD: [] };
+  const grouped = { SD: [], HD: [], embed: [] };
   for (const row of rows) {
+    // Embed streams (SportSRC iframes) — return URL as-is, no proxy
+    if (row.quality === 'EMBED') {
+      grouped.embed.push({ id: row.id, url: row.url, source_name: row.source_name, priority: row.priority });
+      continue;
+    }
     const q       = row.quality === 'HD' ? 'HD' : 'SD';
     const isM3u8  = row.url.includes('.m3u8');
     const isFlv   = /\.flv(\?|$)/i.test(row.url);
@@ -70,14 +75,19 @@ module.exports = async function (fastify, opts) {
       if (cached) return JSON.parse(cached);
     } catch (_) {}
 
-    // ── 2. Check if this is a china-live match ────────────────────────────────
-    let isChina = false;
+    // ── 2. Check match source ─────────────────────────────────────────────────
+    let isChina    = false;
+    let isSportsrc = false;
+    let srcMatchId = null;
     try {
       const matchRow = await db.query(
-        "SELECT source_name FROM matches WHERE id = $1 LIMIT 1",
+        "SELECT source_name, source_match_id FROM matches WHERE id = $1 LIMIT 1",
         [matchId]
       );
-      isChina = matchRow.rows[0]?.source_name === 'chinalive';
+      const src  = matchRow.rows[0]?.source_name;
+      isChina    = src === 'chinalive';
+      isSportsrc = src === 'sportsrc';
+      srcMatchId = matchRow.rows[0]?.source_match_id;
     } catch (_) {}
 
     if (isChina) {
@@ -118,12 +128,38 @@ module.exports = async function (fastify, opts) {
       }
     }
 
+    // ── 3b. SportSRC on-demand embed fetch (no Playwright — pure API call) ──────
+    if (isSportsrc && srcMatchId) {
+      const dbRows = await queryStreams(matchId);
+      if (!dbRows.length) {
+        try {
+          const { getDetail } = require('../scrapers/sportsrc');
+          const detail     = await getDetail(srcMatchId);
+          const streamList = detail?.data?.streams || detail?.streams || [];
+          if (streamList.length) {
+            await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND source_name = $2', [matchId, 'sportsrc']).catch(() => {});
+            for (let i = 0; i < streamList.length; i++) {
+              const url = streamList[i].url || streamList[i].embed || null;
+              if (!url) continue;
+              await db.query(
+                `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, created_at)
+                 VALUES ($1, $2, 'EMBED', 'sportsrc', $3, true, now())`,
+                [matchId, url, streamList.length - i]
+              ).catch(() => {});
+            }
+          }
+        } catch (err) {
+          fastify.log.warn('[streams] sportsrc on-demand fetch failed:', err.message);
+        }
+      }
+    }
+
     // ── 4. Query DB → build proxy URLs → cache ────────────────────────────────
     const rows    = await queryStreams(matchId);
     const grouped = buildGrouped(rows, apiBase);
 
     try {
-      const ttl = isChina ? STREAM_CACHE_TTL_SEC : 15;
+      const ttl = isChina ? STREAM_CACHE_TTL_SEC : isSportsrc ? 20 * 60 : 15;
       await redis.set(cacheKey, JSON.stringify(grouped), 'EX', ttl);
     } catch (_) {}
 

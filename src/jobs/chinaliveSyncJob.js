@@ -203,10 +203,27 @@ const scheduleUpcoming = async () => {
     const matchTime = new Date(row.scheduled_at).getTime();
 
     if (row.status === 'live') {
-      // Already live — start re-warm cycle immediately
       if (!rewarmTimers.has(row.id)) {
-        console.log(`[chinaPrewarm] Starting re-warm cycle for live match — ${label}`);
-        scheduleRewarm(row.id, label);
+        // Check if valid (non-expired) streams exist in DB
+        let hasStreams = false;
+        try {
+          const sr = await db.query(
+            `SELECT 1 FROM stream_urls WHERE match_id = $1 AND is_healthy = true
+             AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1`,
+            [row.id]
+          );
+          hasStreams = sr.rows.length > 0;
+        } catch (_) {}
+
+        if (hasStreams) {
+          // Streams are fresh — start normal 5-min re-warm cycle
+          console.log(`[chinaPrewarm] Starting re-warm cycle for live match — ${label}`);
+          scheduleRewarm(row.id, label);
+        } else {
+          // No valid streams (expired or missing after restart) — re-warm immediately
+          console.log(`[chinaPrewarm] No valid streams found, re-warming now — ${label}`);
+          runPrewarm(row.id, label);
+        }
       }
     } else {
       schedulePrewarm(row.id, matchTime, label);
