@@ -11,7 +11,7 @@ const SYNC_INTERVAL_MS = parseInt(process.env.HESGOAL_SYNC_MS, 10) || 15 * 60 * 
 // Fixed English m3u8 streams — no expiry token, verified stable Rumble CDN channel slots.
 // Checked with HTTP HEAD before use; if alive they become Mobile 1 without needing Playwright.
 const FIXED_ENGLISH_M3U8 = [
-  'https://hugh.cdn.rumble.cloud/live/k5e12sb4/slot-77/5i22-sqch_720p/chunklist_DVR.m3u8',
+  'https://hugh.cdn.rumble.cloud/live/k5e12sb4/slot-77/5i22-sqch_1080p/chunklist_DVR.m3u8',
 ];
 
 const checkFixedStream = async (url) => {
