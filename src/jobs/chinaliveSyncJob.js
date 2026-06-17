@@ -73,7 +73,7 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
        FROM stream_urls
        WHERE match_id = $1
          AND is_healthy = true
-         AND (expires_at IS NULL OR expires_at > NOW())
+         AND (expires_at IS NULL OR expires_at > NOW() - INTERVAL '3 minutes')
        ORDER BY
          CASE quality WHEN 'HD' THEN 1 WHEN 'SD' THEN 2 ELSE 3 END ASC,
          priority DESC, latency_ms ASC NULLS LAST`,
@@ -105,9 +105,12 @@ const warmMatchCache = async (dbMatchId, apiBase) => {
   }
 };
 
-// ─── Re-warm: refresh stream URLs every 7 min while match is live ────────────
+// ─── Re-warm: refresh stream URLs every 2 min while match is live ────────────
 
-const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS) => {
+const MAX_REWARM_FAILS  = 3;
+const REWARM_BACKOFF_MS = 10 * 60 * 1000; // back off to 10 min after repeated failures
+
+const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS, failCount = 0) => {
   // Cancel any existing re-warm for this match first
   if (rewarmTimers.has(dbMatchId)) {
     clearTimeout(rewarmTimers.get(dbMatchId));
@@ -129,6 +132,21 @@ const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS) => 
       }
     } catch (_) {}
 
+    // Skip if tokens still have more than 2× the re-warm interval left
+    try {
+      const { rows: fr } = await db.query(
+        `SELECT MIN(expires_at) AS earliest FROM stream_urls
+         WHERE match_id = $1 AND is_healthy = true AND expires_at IS NOT NULL`,
+        [dbMatchId]
+      );
+      const earliest = fr[0]?.earliest ? new Date(fr[0].earliest) : null;
+      if (earliest && (earliest - Date.now()) > REWARM_INTERVAL_MS * 2) {
+        console.log(`[REWARM] Tokens fresh (${Math.round((earliest - Date.now()) / 1000)}s left) — skipping ${matchLabel}`);
+        scheduleRewarm(dbMatchId, matchLabel, REWARM_INTERVAL_MS, failCount);
+        return;
+      }
+    } catch (_) {}
+
     console.log(`[REWARM] Starting re-warm — ${matchLabel} match=${dbMatchId}`);
     let succeeded = false;
     try {
@@ -136,7 +154,6 @@ const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS) => 
       if (ok) {
         await warmMatchCache(dbMatchId);
         invalidateMatchStreams(dbMatchId);
-        // Log how many healthy streams we now have after re-warm
         try {
           const { rows } = await db.query(
             `SELECT COUNT(*) AS n, MIN(expires_at) AS earliest
@@ -158,8 +175,18 @@ const scheduleRewarm = (dbMatchId, matchLabel, delayMs = REWARM_INTERVAL_MS) => 
     } catch (err) {
       console.error(`[REWARM] Error — ${matchLabel}:`, err.message);
     }
-    // Success → normal 2-min interval. Failure → retry in 2 min.
-    scheduleRewarm(dbMatchId, matchLabel, succeeded ? REWARM_INTERVAL_MS : PREWARM_RETRY_MS);
+
+    if (succeeded) {
+      scheduleRewarm(dbMatchId, matchLabel, REWARM_INTERVAL_MS, 0);
+    } else {
+      const newFails = failCount + 1;
+      if (newFails >= MAX_REWARM_FAILS) {
+        console.warn(`[REWARM] ${MAX_REWARM_FAILS} consecutive failures — backing off to ${REWARM_BACKOFF_MS / 60000} min for ${matchLabel}`);
+        scheduleRewarm(dbMatchId, matchLabel, REWARM_BACKOFF_MS, 0);
+      } else {
+        scheduleRewarm(dbMatchId, matchLabel, REWARM_INTERVAL_MS, newFails);
+      }
+    }
   }, delayMs);
 
   rewarmTimers.set(dbMatchId, handle);

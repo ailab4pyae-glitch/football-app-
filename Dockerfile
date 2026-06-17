@@ -18,6 +18,8 @@ RUN npm ci --omit=dev
 RUN npx playwright install chromium --with-deps
 
 COPY src ./src
+COPY public ./public
+RUN mkdir -p public/logos
 
 EXPOSE 8080
 

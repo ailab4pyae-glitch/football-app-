@@ -8,11 +8,24 @@ const LOCK_POLL_MS    = 500;
 const LOCK_TTL_SEC    = 30;
 
 const buildGrouped = (rows, apiBase) => {
-  const grouped = { SD: [], HD: [], embed: [] };
+  const grouped = { SD: [], HD: [], embed: [], hesgoal: [] };
   for (const row of rows) {
     // Embed streams (SportSRC iframes) — return URL as-is, no proxy
     if (row.quality === 'EMBED') {
       grouped.embed.push({ id: row.id, url: row.url, source_name: row.source_name, priority: row.priority });
+      continue;
+    }
+    // Hesgoal streams — proxy m3u8 but keep in separate bucket
+    if (row.source_name === 'hesgoal') {
+      const isM3u8 = row.url.includes('.m3u8');
+      const direct = process.env.DIRECT_STREAMS === 'true';
+      const proxyUrl = (isM3u8 && !direct) ? `${apiBase}/api/proxy/stream/${row.id}` : row.url;
+      grouped.hesgoal.push({
+        id:          row.id,
+        url:         proxyUrl,
+        source_name: row.source_name,
+        expires_at:  row.expires_at,
+      });
       continue;
     }
     const q       = row.quality === 'HD' ? 'HD' : 'SD';
@@ -42,7 +55,7 @@ const queryStreams = async (matchId) => {
        FROM stream_urls
        WHERE match_id = $1
          AND is_healthy = true
-         AND (expires_at IS NULL OR expires_at > NOW())
+         AND (expires_at IS NULL OR expires_at > NOW() - INTERVAL '3 minutes')
        ORDER BY
          CASE quality WHEN 'HD' THEN 1 WHEN 'SD' THEN 2 ELSE 3 END ASC,
          priority DESC,
@@ -180,7 +193,9 @@ module.exports = async function (fastify, opts) {
       // Never cache an empty sportsrc result — pre-match on-demand calls return nothing,
       // and caching empty for 20 min causes the sync job to skip re-fetch when streams arrive.
       if (hasContent || !isSportsrc) {
-        const ttl = isChina ? STREAM_CACHE_TTL_SEC : isSportsrc ? 20 * 60 : 15;
+        const ttl = isChina
+          ? (hasContent ? STREAM_CACHE_TTL_SEC : 30)
+          : isSportsrc ? 20 * 60 : 15;
         await redis.set(cacheKey, JSON.stringify(grouped), 'EX', ttl);
       }
     } catch (_) {}

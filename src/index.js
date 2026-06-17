@@ -20,6 +20,12 @@ fastify.register(require('@fastify/env'), {
 });
 
 // Allow all origins (public API) — admin panel on Vercel calls /api/admin/* cross-origin
+fastify.register(require('@fastify/static'), {
+  root:   require('path').join(__dirname, '../public'),
+  prefix: '/public/',
+  decorateReply: false,
+});
+
 fastify.register(require('@fastify/cors'), {
   origin: true,
   credentials: true,
@@ -59,6 +65,7 @@ require('./jobs/syncMatches');
 require('./jobs/socoliveSyncJob');
 require('./jobs/chinaliveSyncJob');
 require('./jobs/sportSrcSyncJob');
+require('./jobs/liveHdTvSyncJob');
 // myanmarTvSyncJob disabled — streams are geo-restricted; URLs must be entered manually via Admin → TV & Radio
 require('./jobs/urlHealthJob');
 require('./jobs/finishedMatchCleanupJob');

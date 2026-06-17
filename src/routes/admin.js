@@ -5,6 +5,7 @@ const scraperLog   = require('../config/scraperLog');
 const scraperState = require('../config/scraperState');
 const { run: runChinalive, runForMatch } = require('../scrapers/chinalive');
 const { run: runSocolive               } = require('../scrapers/socolive');
+const { scrapeM3u8: scrapeHesgoal     } = require('../scrapers/hesgoal');
 const { lookupLogo, resolveLogos       } = require('../services/teamLogos');
 
 const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive };
@@ -356,6 +357,50 @@ module.exports = async function adminRoutes(fastify) {
     await bust(`streams:${res.rows[0].match_id}`);
     reply.code(204);
     return null;
+  });
+
+  // ── Hesgoal on-demand scrape ───────────────────────────────────────────────
+  // POST /api/admin/matches/:id/scrape-hesgoal  { url: "https://hes-goal.one/..." }
+  // Launches Playwright, intercepts the m3u8, stores it as a stream URL and returns it.
+  fastify.post('/api/admin/matches/:id/scrape-hesgoal', { preHandler: requireJwt }, async (request, reply) => {
+    const { id } = request.params;
+    const { url: pageUrl } = request.body || {};
+
+    if (!pageUrl) { reply.code(400); return { error: 'url is required' }; }
+
+    const matchRes = await db.query('SELECT id FROM matches WHERE id = $1 LIMIT 1', [id]);
+    if (!matchRes.rows.length) { reply.code(404); return { error: 'Match not found' }; }
+
+    let result;
+    try {
+      result = await scrapeHesgoal(pageUrl, 30000);
+    } catch (err) {
+      reply.code(500);
+      return { error: `Scrape failed: ${err.message}` };
+    }
+
+    if (!result?.url) {
+      reply.code(422);
+      return { error: 'No m3u8 stream found on that page' };
+    }
+
+    // Remove existing hesgoal stream for this match, then insert fresh one
+    await db.query(
+      `DELETE FROM stream_urls WHERE match_id = $1 AND source_name = 'hesgoal'`,
+      [id]
+    ).catch(() => {});
+
+    const { rows } = await db.query(
+      `INSERT INTO stream_urls
+         (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
+       VALUES ($1, $2, 'HD', 'hesgoal', 10, true, $3, now())
+       RETURNING id, url, quality, source_name, priority, is_healthy, expires_at`,
+      [id, result.url, result.expiresAt || null]
+    );
+
+    await bust(`streams:${id}`);
+    reply.code(201);
+    return { stream: rows[0], page_url: pageUrl };
   });
 
   // ── Team Logo Lookup ────────────────────────────────────────────────────────
