@@ -67,6 +67,7 @@ require('./jobs/chinaliveSyncJob');
 require('./jobs/sportSrcSyncJob');
 require('./jobs/liveHdTvSyncJob');
 // myanmarTvSyncJob disabled — streams are geo-restricted; URLs must be entered manually via Admin → TV & Radio
+require('./jobs/hesgoalSyncJob');
 require('./jobs/urlHealthJob');
 require('./jobs/finishedMatchCleanupJob');
 
