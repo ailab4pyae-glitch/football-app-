@@ -91,6 +91,10 @@ const PLAY_SELECTORS = [
   'video', 'button',
 ];
 
+// Domains that consistently fail DNS resolution on the server — skip to avoid wasting time
+const SKIP_DOMAINS = ['reddit-soccer-streams.online'];
+const skipUrl = (url) => url && SKIP_DOMAINS.some((d) => url.includes(d));
+
 /**
  * Build prioritised candidate URLs from channels + edge fallback.
  * mobile_link is the most direct (real embed page, no redirect hop).
@@ -99,14 +103,14 @@ const PLAY_SELECTORS = [
  */
 function buildCandidateUrls(matchId, edges, edgeDomain, channels) {
   const seen = new Set();
-  const add  = (url) => { if (url && url.startsWith('http') && !seen.has(url)) { seen.add(url); return true; } return false; };
+  const add  = (url) => { if (url && url.startsWith('http') && !seen.has(url) && !skipUrl(url)) { seen.add(url); return true; } return false; };
   const urls = [];
 
   // 1. mobile_links — direct embed pages (e.g. soccerball.st, maslaz.com)
   for (const ch of channels) {
     if (add(ch.mobile_link)) urls.push(ch.mobile_link);
   }
-  // 2. channel link pages (reddit-soccer-streams, score808 etc.)
+  // 2. channel link pages (score808 etc.) — reddit-soccer-streams.online is skipped
   for (const ch of channels) {
     if (add(ch.link)) urls.push(ch.link);
   }
@@ -135,6 +139,7 @@ async function scrapeM3u8(matchId, edges, edgeDomain, timeoutMs = 30000, channel
   if (!candidates.length) return null;
 
   let browser;
+  let done = false; // guard: prevents async callbacks from using closed browser
   try {
     browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const ctx = await browser.newContext({
@@ -147,11 +152,15 @@ async function scrapeM3u8(matchId, edges, edgeDomain, timeoutMs = 30000, channel
     const pendingReqHeaders = new Map();
 
     ctx.on('request', (req) => {
-      const url = req.url();
-      if (url.includes('.m3u8')) pendingReqHeaders.set(url, req.headers());
+      if (done) return;
+      try {
+        const url = req.url();
+        if (url.includes('.m3u8')) pendingReqHeaders.set(url, req.headers());
+      } catch (_) {}
     });
 
     ctx.on('response', async (res) => {
+      if (done) return;
       try {
         const url = res.url();
         if (!foundUrl && url.includes('.m3u8') && res.status() === 200) {
@@ -159,8 +168,10 @@ async function scrapeM3u8(matchId, edges, edgeDomain, timeoutMs = 30000, channel
           const reqH = pendingReqHeaders.get(url) || {};
           let cookieStr = '';
           try {
-            const cookies = await ctx.cookies();
-            cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+            if (!done) {
+              const cookies = await ctx.cookies();
+              cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+            }
           } catch (_) {}
           foundHeaders = {
             'User-Agent': reqH['user-agent'] || reqH['User-Agent'] || randomUA(),
@@ -232,6 +243,7 @@ async function scrapeM3u8(matchId, edges, edgeDomain, timeoutMs = 30000, channel
     console.error('[hesgoal-scraper] scrapeM3u8 error:', err.message);
     throw err;
   } finally {
+    done = true; // stop async callbacks from firing on closed CDP session
     if (browser) await browser.close().catch(() => {});
   }
 }

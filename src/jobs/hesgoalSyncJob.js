@@ -8,6 +8,25 @@ const SLUG             = 'hesgoal';
 const TAB_SLUG         = 'hesgoal-live';
 const SYNC_INTERVAL_MS = parseInt(process.env.HESGOAL_SYNC_MS, 10) || 15 * 60 * 1000; // 15 min
 
+// Fixed English m3u8 streams — no expiry token, verified stable Rumble CDN channel slots.
+// Checked with HTTP HEAD before use; if alive they become Mobile 1 without needing Playwright.
+const FIXED_ENGLISH_M3U8 = [
+  'https://hugh.cdn.rumble.cloud/live/k5e12sb4/slot-77/5i22-sqch_720p/chunklist_DVR.m3u8',
+];
+
+const checkFixedStream = async (url) => {
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' },
+    });
+    return res.ok || res.status === 405; // 405 = method not allowed but server alive
+  } catch (_) {
+    return false;
+  }
+};
+
 // ── Source config ─────────────────────────────────────────────────────────────
 
 const getSourceConfig = async () => {
@@ -162,7 +181,9 @@ const startM3u8Scrape = (dbMatchId, m, channels, detail, poolExtras = []) => {
   setImmediate(async () => {
     try {
       // Pass 1 — Mobile 1 (English): pool extras first, then own non-AR English channels
-      const poolCandidates = poolExtras.filter((ch) => ch.mobile_link || ch.link);
+      const poolCandidates = poolExtras.filter(
+        (ch) => (ch.mobile_link || ch.link) && !/\(AR\)/i.test(ch.server_name_en || '')
+      );
       const ownEngCandidates = channels.filter(
         (ch) => ch.language === 'En' && (ch.mobile_link || ch.link) &&
                 !poolCandidates.some((p) => (p.mobile_link || p.link) === (ch.mobile_link || ch.link))
@@ -184,6 +205,17 @@ const startM3u8Scrape = (dbMatchId, m, channels, detail, poolExtras = []) => {
       const results  = [];
       const usedUrls = new Set();
 
+      // Mobile 1: try fixed English streams first (fast HTTP HEAD, no Playwright needed)
+      for (const url of FIXED_ENGLISH_M3U8) {
+        if (results.length >= 1) break;
+        const alive = await checkFixedStream(url);
+        if (alive && !usedUrls.has(url)) {
+          usedUrls.add(url);
+          results.push({ url, expiresAt: null, headers: null });
+          console.log(`[hesgoal] Mobile 1 (fixed/English): ${url.slice(0, 80)}`);
+        }
+      }
+
       const tryScrape = async (ch, tag) => {
         try {
           const result = await scrapeM3u8(m.id, [], '', 20000, [ch]);
@@ -199,7 +231,7 @@ const startM3u8Scrape = (dbMatchId, m, channels, detail, poolExtras = []) => {
         return false;
       };
 
-      // Mobile 1: first English channel that gives an m3u8
+      // Mobile 1 fallback: Playwright scrape if fixed streams all failed
       for (const ch of engCandidates) {
         if (results.length >= 1) break;
         await tryScrape(ch, poolCandidates.includes(ch) ? 'pool' : 'eng');
@@ -326,6 +358,7 @@ const syncHesgoal = async () => {
   for (const { channels } of liveMatchData) {
     for (const ch of channels) {
       if (ch.language !== 'En') continue;
+      if (/\(AR\)/i.test(ch.server_name_en || '')) continue; // exclude Arabic-labelled even if language='En'
       const key = ch.mobile_link || ch.link;
       if (key && !poolSeen.has(key)) { poolSeen.add(key); englishPool.push(ch); }
     }

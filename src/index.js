@@ -1,6 +1,11 @@
 require('dotenv').config();
 require('./config/scraperLog'); // intercept console before any scraper runs
 
+// Prevent unhandled async rejections (e.g. Playwright CDP events after browser.close()) from crashing the process
+process.on('unhandledRejection', (reason) => {
+  console.warn('[process] Unhandled rejection (non-fatal):', reason?.message || reason);
+});
+
 const fastify = require('fastify')({ logger: true, trustProxy: true });
 
 fastify.register(require('@fastify/env'), {
