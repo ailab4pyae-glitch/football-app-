@@ -6,9 +6,10 @@ const scraperState = require('../config/scraperState');
 const { run: runChinalive, runForMatch } = require('../scrapers/chinalive');
 const { run: runSocolive               } = require('../scrapers/socolive');
 const { scrapeM3u8: scrapeHesgoal     } = require('../scrapers/hesgoal');
+const { syncHesgoal: runHesgoal        } = require('../jobs/hesgoalSyncJob');
 const { lookupLogo, resolveLogos       } = require('../services/teamLogos');
 
-const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive };
+const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive, hesgoal: runHesgoal };
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
@@ -486,7 +487,7 @@ module.exports = async function adminRoutes(fastify) {
 
   fastify.get('/api/admin/scrapers', { preHandler: requireJwt }, async () => {
     const { rows } = await db.query(
-      `SELECT id, name, slug, is_active FROM sources WHERE slug IN ('chinalive','socolive') ORDER BY name`
+      `SELECT id, name, slug, is_active FROM sources WHERE slug IN ('chinalive','socolive','hesgoal') ORDER BY name`
     );
 
     return rows.map((s) => {
@@ -505,7 +506,7 @@ module.exports = async function adminRoutes(fastify) {
 
   fastify.post('/api/admin/scrapers/:slug/toggle', { preHandler: requireJwt }, async (request, reply) => {
     const { slug } = request.params;
-    if (!['chinalive', 'socolive'].includes(slug)) {
+    if (!['chinalive', 'socolive', 'hesgoal'].includes(slug)) {
       reply.code(400);
       return { error: 'Unknown scraper slug' };
     }

@@ -9,22 +9,28 @@ const LOCK_TTL_SEC    = 30;
 
 const buildGrouped = (rows, apiBase) => {
   const grouped = { SD: [], HD: [], embed: [], hesgoal: [] };
+  // Counters for per-type hesgoal button labels: Mobile N (m3u8) and PC N (iframe embed)
+  let hesgoalMobile = 0, hesgoalPc = 0;
   for (const row of rows) {
     // Embed streams (SportSRC iframes) — return URL as-is, no proxy
     if (row.quality === 'EMBED') {
       grouped.embed.push({ id: row.id, url: row.url, source_name: row.source_name, priority: row.priority });
       continue;
     }
-    // Hesgoal streams — proxy m3u8 but keep in separate bucket
-    if (row.source_name === 'hesgoal') {
-      const isM3u8 = row.url.includes('.m3u8');
-      const direct = process.env.DIRECT_STREAMS === 'true';
+    // Hesgoal streams:
+    //   source_name = 'hesgoal'        → native m3u8 → "Mobile N" button
+    //   source_name = 'hesgoal:Label'  → iframe embed → "PC N" button
+    if (row.source_name === 'hesgoal' || row.source_name?.startsWith('hesgoal:')) {
+      const isMobile = row.source_name === 'hesgoal'; // m3u8 native stream
+      const isM3u8   = row.url.includes('.m3u8');
+      const direct   = process.env.DIRECT_STREAMS === 'true';
       const proxyUrl = (isM3u8 && !direct) ? `${apiBase}/api/proxy/stream/${row.id}` : row.url;
+      const label    = isMobile ? `Mobile ${++hesgoalMobile}` : `PC ${++hesgoalPc}`;
       grouped.hesgoal.push({
-        id:          row.id,
-        url:         proxyUrl,
-        source_name: row.source_name,
-        expires_at:  row.expires_at,
+        id:         row.id,
+        url:        proxyUrl,
+        label,
+        expires_at: row.expires_at,
       });
       continue;
     }
@@ -189,7 +195,7 @@ module.exports = async function (fastify, opts) {
     const grouped = buildGrouped(rows, apiBase);
 
     try {
-      const hasContent = grouped.SD.length || grouped.HD.length || grouped.embed.length;
+      const hasContent = grouped.SD.length || grouped.HD.length || grouped.embed.length || grouped.hesgoal.length;
       // Never cache an empty sportsrc result — pre-match on-demand calls return nothing,
       // and caching empty for 20 min causes the sync job to skip re-fetch when streams arrive.
       if (hasContent || !isSportsrc) {

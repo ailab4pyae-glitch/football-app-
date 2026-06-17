@@ -112,6 +112,29 @@ module.exports = async (fastify) => {
       } else if (source_name === 'socolive') {
         const raw = await getM3u8Cached(cdnUrl, () => soco.fetchM3u8(cdnUrl));
         m3u8 = soco.rewriteM3u8(raw, base, basePath);
+      } else if (source_name === 'hesgoal' || source_name?.startsWith('hesgoal:')) {
+        const stored = record.headers || {};
+        const fetchHesgoal = async () => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          try {
+            const res = await fetch(cdnUrl, {
+              signal: controller.signal,
+              headers: {
+                'User-Agent': stored['User-Agent'] || STREAM_UA,
+                ...(stored['Referer'] ? { Referer: stored['Referer'] } : {}),
+                ...(stored['Origin']  ? { Origin:  stored['Origin']  } : {}),
+                ...(stored['Cookie']  ? { Cookie:  stored['Cookie']  } : {}),
+              },
+            });
+            if (!res.ok) throw Object.assign(new Error('CDN unavailable'), { status: res.status });
+            return res.text();
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+        const raw = await getM3u8Cached(cdnUrl, fetchHesgoal);
+        m3u8 = rewriteOtherM3u8(raw, base, basePath);
       } else {
         const raw = await getM3u8Cached(cdnUrl, () => fetchOtherM3u8(cdnUrl, referer));
         m3u8 = rewriteOtherM3u8(raw, base, basePath);

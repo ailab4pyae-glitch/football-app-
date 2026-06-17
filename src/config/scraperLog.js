@@ -12,6 +12,7 @@ const SLUG_NORMALIZE = {
   myanmartvsynccjob: 'myanmartv', myanmarTvSyncJob: 'myanmartv',
   urlhealthjob: 'health', urlHealthJob: 'health',
   syncmatches: 'sync', syncMatches: 'sync',
+  'hesgoal-scraper': 'hesgoal', hesgoalsyncjob: 'hesgoal', hesgoalSyncJob: 'hesgoal',
 };
 
 const slugFrom = (raw) => {

@@ -19,7 +19,7 @@ const getStreamRecord = async (id) => {
   // Check is_healthy AND expires_at — an expired/unhealthy stream must return null
   // so the proxy returns 404 instead of trying a dead CDN URL (which shows "server fail").
   const { rows } = await db.query(
-    `SELECT url, source_name, match_id, expires_at FROM stream_urls
+    `SELECT url, source_name, match_id, expires_at, headers FROM stream_urls
      WHERE id = $1 AND is_healthy = true AND (expires_at IS NULL OR expires_at > NOW())
      LIMIT 1`,
     [id]
@@ -32,7 +32,7 @@ const getStreamRecord = async (id) => {
   const row        = rows[0];
   const expiresMs  = row.expires_at ? new Date(row.expires_at).getTime() : now + 10 * 60 * 1000;
   const validUntil = Math.min(expiresMs - 5 * 60 * 1000, now + 10 * 60 * 1000);
-  const entry      = { url: row.url, source_name: row.source_name, match_id: row.match_id, validUntil };
+  const entry      = { url: row.url, source_name: row.source_name, match_id: row.match_id, headers: row.headers || null, validUntil };
   streamCache.set(id, entry);
   return entry;
 };
