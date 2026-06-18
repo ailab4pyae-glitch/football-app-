@@ -374,7 +374,7 @@ module.exports = async function adminRoutes(fastify) {
 
     let result;
     try {
-      result = await scrapeHesgoal(pageUrl, 30000);
+      result = await scrapeHesgoal(null, [], null, 30000, [{ link: pageUrl }]);
     } catch (err) {
       reply.code(500);
       return { error: `Scrape failed: ${err.message}` };

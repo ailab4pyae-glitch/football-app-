@@ -64,12 +64,9 @@ fastify.register(require('./routes/proxy/index'));
 fastify.register(require('./routes/tv'));
 fastify.register(require('./routes/subscription'));
 fastify.register(require('./routes/auth').routes);
-fastify.register(require('./routes/sportsrc'));
-
 require('./jobs/syncMatches');
 require('./jobs/socoliveSyncJob');
 require('./jobs/chinaliveSyncJob');
-require('./jobs/sportSrcSyncJob');
 require('./jobs/liveHdTvSyncJob');
 // myanmarTvSyncJob disabled — streams are geo-restricted; URLs must be entered manually via Admin → TV & Radio
 require('./jobs/hesgoalSyncJob');

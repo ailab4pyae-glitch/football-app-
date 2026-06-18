@@ -135,18 +135,13 @@ module.exports = async function (fastify, opts) {
     const apiBase  = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
 
     // ── 1. Check match source ─────────────────────────────────────────────────
-    let isChina    = false;
-    let isSportsrc = false;
-    let srcMatchId = null;
+    let isChina = false;
     try {
       const matchRow = await db.query(
-        "SELECT source_name, source_match_id FROM matches WHERE id = $1 LIMIT 1",
+        "SELECT source_name FROM matches WHERE id = $1 LIMIT 1",
         [matchId]
       );
-      const src  = matchRow.rows[0]?.source_name;
-      isChina    = src === 'chinalive';
-      isSportsrc = src === 'sportsrc';
-      srcMatchId = matchRow.rows[0]?.source_match_id;
+      isChina = matchRow.rows[0]?.source_name === 'chinalive';
     } catch (_) {}
 
     // ── 2. Cache hit → return immediately (skip if sportsrc with empty embeds) ─
@@ -171,8 +166,7 @@ module.exports = async function (fastify, opts) {
             return parsed;
           }
         }
-        // For sportsrc: don't return an empty embed cache — fall through to re-fetch
-        if (!isSportsrc || parsed.embed?.length > 0) return parsed;
+        return parsed;
       } else if (isChina) {
         console.log(`[CHINA-CACHE] Redis MISS match=${matchId} — querying DB`);
       }
@@ -217,34 +211,6 @@ module.exports = async function (fastify, opts) {
       }
     }
 
-    // ── 3b. SportSRC on-demand embed fetch (no Playwright — pure API call) ──────
-    if (isSportsrc && srcMatchId) {
-      const dbRows = await queryStreams(matchId);
-      if (!dbRows.length) {
-        try {
-          const { getDetail } = require('../scrapers/sportsrc');
-          const detail     = await getDetail(srcMatchId);
-          const streamList = detail?.data?.sources || detail?.data?.streams || detail?.streams || [];
-          if (streamList.length) {
-            await db.query('DELETE FROM stream_urls WHERE match_id = $1 AND quality = $2', [matchId, 'EMBED']).catch(() => {});
-            for (let i = 0; i < streamList.length; i++) {
-              const s   = streamList[i];
-              const url = s.embedUrl || s.url || s.embed || s.link || null;
-              if (!url) continue;
-              const name = s.language || s.name || s.title || s.label || s.channel || 'sportsrc';
-              await db.query(
-                `INSERT INTO stream_urls (match_id, url, quality, source_name, priority, is_healthy, created_at)
-                 VALUES ($1, $2, 'EMBED', $3, $4, true, now())`,
-                [matchId, url, name, streamList.length - i]
-              ).catch(() => {});
-            }
-          }
-        } catch (err) {
-          fastify.log.warn('[streams] sportsrc on-demand fetch failed:', err.message);
-        }
-      }
-    }
-
     // ── 4. Query DB → build proxy URLs → cache ────────────────────────────────
     const rows    = await queryStreams(matchId);
     const grouped = buildGrouped(rows, apiBase);
@@ -254,14 +220,8 @@ module.exports = async function (fastify, opts) {
 
     try {
       const hasContent = grouped.SD.length || grouped.HD.length || grouped.embed.length || grouped.hesgoal.length;
-      // Never cache an empty sportsrc result — pre-match on-demand calls return nothing,
-      // and caching empty for 20 min causes the sync job to skip re-fetch when streams arrive.
-      if (hasContent || !isSportsrc) {
-        const ttl = isChina
-          ? (hasContent ? STREAM_CACHE_TTL_SEC : 30)
-          : isSportsrc ? 20 * 60 : 15;
-        await redis.set(cacheKey, JSON.stringify(grouped), 'EX', ttl);
-      }
+      const ttl = isChina ? (hasContent ? STREAM_CACHE_TTL_SEC : 30) : 15;
+      await redis.set(cacheKey, JSON.stringify(grouped), 'EX', ttl);
     } catch (_) {}
 
     return grouped;

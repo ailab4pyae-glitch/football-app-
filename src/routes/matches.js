@@ -84,28 +84,17 @@ module.exports = async function (fastify, opts) {
            -- Scraped matches from soco-live / china-live
            SELECT m.id, m.title,
                   COALESCE(
-                    CASE WHEN t.slug = 'china-live' THEN COALESCE(en.home_team, hg.home_team) END,
+                    CASE WHEN t.slug = 'china-live' THEN hg.home_team END,
                     m.home_team
                   ) AS home_team,
                   COALESCE(
-                    CASE WHEN t.slug = 'china-live' THEN COALESCE(en.away_team, hg.away_team) END,
+                    CASE WHEN t.slug = 'china-live' THEN hg.away_team END,
                     m.away_team
                   ) AS away_team,
                   m.home_logo, m.away_logo,
                   m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
                   m.league, t.slug AS source_tab, 1 AS priority
            FROM matches m JOIN tabs t ON m.tab_id = t.id
-           LEFT JOIN LATERAL (
-             SELECT en.home_team, en.away_team
-             FROM matches en
-             JOIN tabs et ON en.tab_id = et.id
-             WHERE et.slug = 'sport-src'
-               AND en.scheduled_at IS NOT NULL
-               AND m.scheduled_at IS NOT NULL
-               AND ABS(EXTRACT(EPOCH FROM (en.scheduled_at - m.scheduled_at))) < 600
-             ORDER BY ABS(EXTRACT(EPOCH FROM (en.scheduled_at - m.scheduled_at))) ASC
-             LIMIT 1
-           ) en ON t.slug = 'china-live'
            LEFT JOIN LATERAL (
              SELECT hg.home_team, hg.away_team
              FROM matches hg
