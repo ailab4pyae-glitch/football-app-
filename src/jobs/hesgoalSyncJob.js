@@ -12,6 +12,7 @@ const SYNC_INTERVAL_MS = parseInt(process.env.HESGOAL_SYNC_MS, 10) || 15 * 60 * 
 // Checked with HTTP HEAD before use; if alive they become Mobile 1 without needing Playwright.
 const FIXED_ENGLISH_M3U8 = [
   'https://hugh.cdn.rumble.cloud/live/k5e12sb4/slot-77/5i22-sqch_1080p/chunklist_DVR.m3u8',
+  'https://hugh.cdn.rumble.cloud/live/k5e12sb4/slot-77/5i22-sqch_720p/chunklist_DVR.m3u8',
 ];
 
 const checkFixedStream = async (url) => {
@@ -205,14 +206,12 @@ const startM3u8Scrape = (dbMatchId, m, channels, detail, poolExtras = []) => {
       const results  = [];
       const usedUrls = new Set();
 
-      // Mobile 1: try fixed English streams first (fast HTTP HEAD, no Playwright needed)
-      for (const url of FIXED_ENGLISH_M3U8) {
-        if (results.length >= 1) break;
-        const alive = await checkFixedStream(url);
-        if (alive && !usedUrls.has(url)) {
+      // Fixed English streams: 1080p + 720p share the same CDN slot — one HEAD check is enough
+      if (FIXED_ENGLISH_M3U8.length && await checkFixedStream(FIXED_ENGLISH_M3U8[0])) {
+        for (const url of FIXED_ENGLISH_M3U8) {
           usedUrls.add(url);
           results.push({ url, expiresAt: null, headers: null });
-          console.log(`[hesgoal] Mobile 1 (fixed/English): ${url.slice(0, 80)}`);
+          console.log(`[hesgoal] Mobile ${results.length} (fixed/English): ${url.slice(0, 80)}`);
         }
       }
 
@@ -237,9 +236,9 @@ const startM3u8Scrape = (dbMatchId, m, channels, detail, poolExtras = []) => {
         await tryScrape(ch, poolCandidates.includes(ch) ? 'pool' : 'eng');
       }
 
-      // Mobile 2: first Arabic channel that gives an m3u8
+      // Mobile 3: first Arabic channel that gives an m3u8
       for (const ch of arCandidates) {
-        if (results.length >= 2) break;
+        if (results.length >= 3) break;
         await tryScrape(ch, 'ar');
       }
 

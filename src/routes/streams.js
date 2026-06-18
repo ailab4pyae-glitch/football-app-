@@ -25,7 +25,14 @@ const buildGrouped = (rows, apiBase) => {
       const isM3u8   = row.url.includes('.m3u8');
       const direct   = process.env.DIRECT_STREAMS === 'true';
       const proxyUrl = (isM3u8 && !direct) ? `${apiBase}/api/proxy/stream/${row.id}` : row.url;
-      const label    = isMobile ? `Mobile ${++hesgoalMobile}` : `PC ${++hesgoalPc}`;
+      let label;
+      if (isMobile) {
+        if (row.url.includes('1080p'))      label = 'English 1080';
+        else if (row.url.includes('720p') && row.url.includes('rumble')) label = 'English 720';
+        else                               label = `Mobile ${++hesgoalMobile}`;
+      } else {
+        label = `PC ${++hesgoalPc}`;
+      }
       grouped.hesgoal.push({
         id:         row.id,
         url:        proxyUrl,
@@ -80,11 +87,15 @@ const mergeHesgoalStreams = async (grouped, matchId, apiBase) => {
       [scheduledAt]
     );
     const direct = process.env.DIRECT_STREAMS === 'true';
-    let n = 0;
+    let mobileN = 0;
     for (const row of hRows) {
       const isM3u8 = row.url.includes('.m3u8');
       const proxyUrl = (isM3u8 && !direct) ? `${apiBase}/api/proxy/stream/${row.id}` : row.url;
-      grouped.hesgoal.push({ id: row.id, url: proxyUrl, label: `Mobile ${++n}`, expires_at: row.expires_at });
+      let label;
+      if (row.url.includes('1080p'))                             label = 'English 1080';
+      else if (row.url.includes('720p') && row.url.includes('rumble')) label = 'English 720';
+      else                                                       label = `Mobile ${++mobileN}`;
+      grouped.hesgoal.push({ id: row.id, url: proxyUrl, label, expires_at: row.expires_at });
     }
   } catch (_) {}
 };
@@ -150,6 +161,14 @@ module.exports = async function (fastify, opts) {
             console.warn(`[CHINA-CACHE] Redis HIT but empty for match=${matchId} — falling through to DB`);
           } else {
             console.log(`[CHINA-CACHE] Redis HIT match=${matchId} SD=${sdCount} HD=${hdCount}`);
+            // If hesgoal merge was requested and cache has none OR has stale labels (v<2), re-derive
+            if (request.query.includeHesgoal === 'true' && (!parsed.hesgoal?.length || parsed._hesgoalV !== 2)) {
+              parsed.hesgoal = [];
+              await mergeHesgoalStreams(parsed, matchId, apiBase);
+              parsed._hesgoalV = 2;
+              await redis.set(cacheKey, JSON.stringify(parsed), 'EX', STREAM_CACHE_TTL_SEC).catch(() => {});
+            }
+            return parsed;
           }
         }
         // For sportsrc: don't return an empty embed cache — fall through to re-fetch
@@ -165,7 +184,7 @@ module.exports = async function (fastify, opts) {
       if (dbRows.length > 0) {
         // Fresh URLs in DB (from pre-warm/re-warm) — cache and return immediately
         const grouped = buildGrouped(dbRows, apiBase);
-        if (request.query.includeHesgoal === 'true') await mergeHesgoalStreams(grouped, matchId, apiBase);
+        if (request.query.includeHesgoal === 'true') { await mergeHesgoalStreams(grouped, matchId, apiBase); grouped._hesgoalV = 2; }
         try { await redis.set(cacheKey, JSON.stringify(grouped), 'EX', STREAM_CACHE_TTL_SEC); } catch (_) {}
         return grouped;
       }
@@ -231,7 +250,7 @@ module.exports = async function (fastify, opts) {
     const grouped = buildGrouped(rows, apiBase);
 
     // ── 5. Merge hesgoal m3u8 streams when requested and none exist ───────────
-    if (request.query.includeHesgoal === 'true') await mergeHesgoalStreams(grouped, matchId, apiBase);
+    if (request.query.includeHesgoal === 'true') { await mergeHesgoalStreams(grouped, matchId, apiBase); grouped._hesgoalV = 2; }
 
     try {
       const hasContent = grouped.SD.length || grouped.HD.length || grouped.embed.length || grouped.hesgoal.length;
