@@ -54,6 +54,41 @@ const buildGrouped = (rows, apiBase) => {
   return grouped;
 };
 
+// Look up hesgoal m3u8 streams for a match at the same scheduled time (±1 hour).
+// Mutates grouped.hesgoal in place; used when the primary match has no hesgoal streams.
+const mergeHesgoalStreams = async (grouped, matchId, apiBase) => {
+  if (grouped.hesgoal.length) return; // already has hesgoal streams
+  try {
+    const { rows: timeRow } = await db.query(
+      'SELECT scheduled_at FROM matches WHERE id = $1 LIMIT 1', [matchId]
+    );
+    const scheduledAt = timeRow[0]?.scheduled_at;
+    if (!scheduledAt) return;
+    const { rows: hRows } = await db.query(
+      `SELECT su.id, su.url, su.priority, su.expires_at
+       FROM stream_urls su
+       JOIN matches m ON su.match_id = m.id
+       JOIN tabs t ON m.tab_id = t.id
+       WHERE t.slug = 'hesgoal-live'
+         AND m.scheduled_at IS NOT NULL
+         AND ABS(EXTRACT(EPOCH FROM (m.scheduled_at - $1::timestamptz))) < 3600
+         AND su.source_name = 'hesgoal'
+         AND su.is_healthy = true
+         AND (su.expires_at IS NULL OR su.expires_at > NOW() - INTERVAL '3 minutes')
+       ORDER BY su.priority DESC
+       LIMIT 3`,
+      [scheduledAt]
+    );
+    const direct = process.env.DIRECT_STREAMS === 'true';
+    let n = 0;
+    for (const row of hRows) {
+      const isM3u8 = row.url.includes('.m3u8');
+      const proxyUrl = (isM3u8 && !direct) ? `${apiBase}/api/proxy/stream/${row.id}` : row.url;
+      grouped.hesgoal.push({ id: row.id, url: proxyUrl, label: `Mobile ${++n}`, expires_at: row.expires_at });
+    }
+  } catch (_) {}
+};
+
 const queryStreams = async (matchId) => {
   try {
     const { rows } = await db.query(
@@ -130,6 +165,7 @@ module.exports = async function (fastify, opts) {
       if (dbRows.length > 0) {
         // Fresh URLs in DB (from pre-warm/re-warm) — cache and return immediately
         const grouped = buildGrouped(dbRows, apiBase);
+        if (request.query.includeHesgoal === 'true') await mergeHesgoalStreams(grouped, matchId, apiBase);
         try { await redis.set(cacheKey, JSON.stringify(grouped), 'EX', STREAM_CACHE_TTL_SEC); } catch (_) {}
         return grouped;
       }
@@ -193,6 +229,9 @@ module.exports = async function (fastify, opts) {
     // ── 4. Query DB → build proxy URLs → cache ────────────────────────────────
     const rows    = await queryStreams(matchId);
     const grouped = buildGrouped(rows, apiBase);
+
+    // ── 5. Merge hesgoal m3u8 streams when requested and none exist ───────────
+    if (request.query.includeHesgoal === 'true') await mergeHesgoalStreams(grouped, matchId, apiBase);
 
     try {
       const hasContent = grouped.SD.length || grouped.HD.length || grouped.embed.length || grouped.hesgoal.length;
