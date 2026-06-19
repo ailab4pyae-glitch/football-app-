@@ -57,9 +57,9 @@ const BAN_SIGNALS = {
     urls: async () => {
       try {
         const r = await db.query("SELECT config FROM sources WHERE slug='chinalive' LIMIT 1");
-        const base = r.rows[0]?.config?.api_base || 'https://json.yyzb456.top';
+        const base = r.rows[0]?.config?.api_base || 'https://json.ncctrials.com';
         return [`${base}/all_live_rooms.json?v=1`];
-      } catch { return ['https://json.yyzb456.top/all_live_rooms.json?v=1']; }
+      } catch { return ['https://json.ncctrials.com/all_live_rooms.json?v=1']; }
     },
     expect: async (body) => body.includes('"code":200') || body.includes('"liveStatus"'),
   },

@@ -4,7 +4,7 @@ const db = require('../config/database');
 const { resolveLogos } = require('../services/teamLogos');
 
 const CHINA_DEFAULTS = {
-  api_base: 'https://json.yyzb456.top',
+  api_base: 'https://json.ncctrials.com',
   referer:  'https://yyzbw8.live/',
 };
 
