@@ -24,7 +24,7 @@ const { Telegraf, Markup } = require('telegraf');
 
 const BOT_TOKEN       = process.env.BOT_TOKEN;
 const API_BASE        = process.env.API_BASE        || 'http://localhost:3050';
-const WEBSITE_URL     = process.env.WEBSITE_URL     || 'https://yoursite.com';
+const WEBSITE_URL     = process.env.WEBSITE_URL     || 'https://streamzone-delta.vercel.app';
 const ADMIN_CHAT_ID   = process.env.ADMIN_CHAT_ID;
 const PAYMENT_KPAY    = process.env.PAYMENT_KPAY    || '';
 const PAYMENT_WAVEPAY = process.env.PAYMENT_WAVEPAY || '';
@@ -76,29 +76,33 @@ bot.start(async (ctx) => {
 
   const name = ctx.from.first_name || 'there';
 
+  const mainKeyboard = Markup.keyboard([
+    ['📋 Plan များ', '📱 ကျွန်ုပ်၏ Status'],
+    ['💬 အကူအညီ'],
+  ]).resize()
+
+  const watchButton = Markup.inlineKeyboard([[
+    Markup.button.webApp('⚽ Watch Live Now', WEBSITE_URL),
+  ]])
+
   if (check.active) {
     const sub  = check.subscription;
     const exp  = new Date(sub.expires_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
     await ctx.replyWithMarkdown(
       `✅ *ကြိုဆိုပါသည်, ${name}!*\n\n` +
       `သင့် *${sub.plan_name}* စာရင်းသွင်းမှု လက်ရှိတက်ကြွနေသည်။\n` +
-      `📅 သက်တမ်းကုန်သည့်ရက်: *${exp}*\n\n` +
-      `🔗 တိုက်ရိုက်ကြည့်ရန်: ${WEBSITE_URL}`,
-      Markup.keyboard([
-        ['📋 Plan များ', '📱 ကျွန်ုပ်၏ Status'],
-        ['💬 အကူအညီ'],
-      ]).resize()
+      `📅 သက်တမ်းကုန်သည့်ရက်: *${exp}*`,
+      mainKeyboard
     );
+    await ctx.reply('👇 App ဖွင့်ရန်', watchButton);
   } else {
     await ctx.replyWithMarkdown(
       `⚽ *BalloneTV မှ ကြိုဆိုပါသည်, ${name}!*\n\n` +
       `ဘောလုံး တိုက်ရိုက်ထုတ်လွှင့်မှုများကို အချိန်မရွေး ကြည့်ရှုနိုင်သည်။\n\n` +
       `*📋 Plan များ* ကိုနှိပ်၍ စာရင်းသွင်းမှု package များကို ကြည့်ရှုပါ။`,
-      Markup.keyboard([
-        ['📋 Plan များ', '📱 ကျွန်ုပ်၏ Status'],
-        ['💬 အကူအညီ'],
-      ]).resize()
+      mainKeyboard
     );
+    await ctx.reply('👇 Live matches ကြည့်ရန်', watchButton);
   }
 });
 

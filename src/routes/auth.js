@@ -134,6 +134,80 @@ module.exports.routes = async function authRoutes(fastify) {
     return result;
   });
 
+  // ── POST /api/auth/telegram ──────────────────────────────────────────────
+  // Telegram Mini App: verify initData, return device_token for the user.
+  // Client sends window.Telegram.WebApp.initData as body { initData }.
+  fastify.post('/api/auth/telegram', async (request, reply) => {
+    const { initData } = request.body || {};
+    if (!initData) { reply.code(400); return { error: 'initData required' }; }
+
+    // Verify HMAC signature from Telegram
+    const secret  = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const params  = new URLSearchParams(initData);
+    const hash    = params.get('hash');
+    params.delete('hash');
+    const checkStr = [...params.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join('\n');
+    const computed = crypto.createHmac('sha256', secret).update(checkStr).digest('hex');
+
+    if (computed !== hash) { reply.code(401); return { error: 'Invalid Telegram signature' }; }
+
+    // Parse user from initData
+    let tgUser;
+    try { tgUser = JSON.parse(params.get('user')); } catch (_) { reply.code(400); return { error: 'Invalid user payload' }; }
+
+    const tgId    = String(tgUser.id);
+    const name    = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ');
+    const uname   = tgUser.username || null;
+
+    // Upsert user in tg_users
+    const upsert = await db.query(
+      `INSERT INTO tg_users (telegram_id, full_name, username, created_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (telegram_id) DO UPDATE
+         SET full_name = COALESCE(EXCLUDED.full_name, tg_users.full_name),
+             username  = COALESCE(EXCLUDED.username,  tg_users.username)
+       RETURNING id, device_token`,
+      [tgId, name, uname]
+    );
+    const user = upsert.rows[0];
+
+    // If no device_token yet, return empty — they'll get one after subscription approval
+    if (!user.device_token) {
+      return { token: null, is_premium: false, reason: 'no_subscription' };
+    }
+
+    // Return the existing token — frontend saves it, uses /auth/check normally
+    const cacheKey = `auth:${user.device_token}`;
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) return { token: user.device_token, ...JSON.parse(cached) };
+    } catch (_) {}
+
+    const { rows } = await db.query(
+      `SELECT s.status AS sub_status, s.expires_at, p.name AS plan_name
+       FROM tg_users u
+       LEFT JOIN LATERAL (
+         SELECT s.status, s.expires_at, s.plan_id FROM subscriptions s
+         WHERE s.user_id = u.id AND s.status = 'active'
+         ORDER BY s.expires_at DESC LIMIT 1
+       ) s ON true
+       LEFT JOIN subscription_plans p ON p.id = s.plan_id
+       WHERE u.id = $1`,
+      [user.id]
+    );
+    const row      = rows[0] || {};
+    const isActive = row.sub_status === 'active' && new Date(row.expires_at) > new Date();
+    const result   = {
+      token:       user.device_token,
+      is_premium:  isActive,
+      plan_name:   row.plan_name  || null,
+      expires_at:  row.expires_at || null,
+      reason: isActive ? null : 'no_subscription',
+    };
+    try { await redis.set(cacheKey, JSON.stringify({ ...result, token: undefined }), 'EX', isActive ? 120 : 30); } catch (_) {}
+    return result;
+  });
+
   // ── POST /api/auth/activate ───────────────────────────────────────────────
   // Mobile app calls this to register token on first launch.
   // Body: { token }  OR  Authorization: Bearer <token>
